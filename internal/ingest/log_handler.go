@@ -90,7 +90,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 					ReceivedAt: receivedAt,
 				})
 			}
-			
+
 			if !handlerConfiguration.rawLogPusher.PushBatch(rawLogs) {
 				writeJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
 				return
