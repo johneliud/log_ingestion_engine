@@ -14,7 +14,7 @@ func TestLogLevelConstants_MatchClientContract(t *testing.T) {
 		{"error level matches the uppercase client contract", LogLevelError, "ERROR"},
 		{"debug level matches the uppercase client contract", LogLevelDebug, "DEBUG"},
 	}
-	
+
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -36,7 +36,7 @@ func TestDestinationConstants_MatchStorageContract(t *testing.T) {
 		{"service2 destination matches the storage database name", DestinationService2, "service2"},
 		{"service3 destination matches the storage database name", DestinationService3, "service3"},
 	}
-	
+
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
