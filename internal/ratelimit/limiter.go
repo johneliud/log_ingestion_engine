@@ -57,7 +57,6 @@ func (perIPRateLimiterRegistry *PerIPRateLimiterRegistry) AllowWithoutConsumingC
 		entry.lastUsed = perIPRateLimiterRegistry.currentTimeProvider()
 		return delay, false
 	}
-	reservation.Cancel()
 	entry.lastUsed = perIPRateLimiterRegistry.currentTimeProvider()
 	return 0, true
 }

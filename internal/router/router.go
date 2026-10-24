@@ -23,6 +23,9 @@ func NewServiceRouter(routingConfigurationFilePath string, defaultDestination st
 	if defaultDestinationValue == "" {
 		defaultDestinationValue = model.DestinationService1
 	}
+	if !isValidDestination(defaultDestinationValue) {
+		return nil, fmt.Errorf("unknown default destination %q", defaultDestination)
+	}
 
 	if routingConfigurationFilePath == "" {
 		return &ServiceRouter{rules: routingRules, defaultDestination: defaultDestinationValue}, nil
@@ -42,10 +45,22 @@ func NewServiceRouter(routingConfigurationFilePath string, defaultDestination st
 	}
 
 	for serviceName, destinationName := range routingConfiguration {
+		if !isValidDestination(model.Destination(destinationName)) {
+			return nil, fmt.Errorf("unknown destination %q for service %q", destinationName, serviceName)
+		}
 		routingRules[serviceName] = model.Destination(destinationName)
 	}
 
 	return &ServiceRouter{rules: routingRules, defaultDestination: defaultDestinationValue}, nil
+}
+
+func isValidDestination(destination model.Destination) bool {
+	switch destination {
+	case model.DestinationService1, model.DestinationService2, model.DestinationService3:
+		return true
+	default:
+		return false
+	}
 }
 
 // Routes an enriched log to its destination.

@@ -1,7 +1,11 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -53,16 +57,135 @@ func TestBatchConsumer_ProcessesBatchesThroughEnrichmentAndRouting(t *testing.T)
 	consumer := NewBatchConsumer(rawLogsChannel, 50, 4, fakeEnricher{}, fakeRouter{}, publisher)
 
 	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
-	consumer.Start(applicationContext)
+	defer applicationContextCancellation()
+	completed := consumer.Start(applicationContext)
 
 	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims", Level: model.LogLevelError, Message: "x", Timestamp: "2026-10-24T10:00:00Z"}}
 	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "billing", Level: model.LogLevelInfo, Message: "y", Timestamp: "2026-10-24T10:00:01Z"}}
 
-	time.Sleep(200 * time.Millisecond)
 	applicationContextCancellation()
-	time.Sleep(50 * time.Millisecond)
+	waitForConsumer(t, completed)
 
 	if publisher.count() != 2 {
 		t.Fatalf("published count = %d, want 2", publisher.count())
+	}
+}
+
+func waitForConsumer(t *testing.T, completed <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-completed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer did not finish draining")
+	}
+}
+
+func TestBatchConsumer_DrainsAfterCancellation(t *testing.T) {
+	t.Parallel()
+	rawLogsChannel := make(chan model.RawLog, 11)
+	for range cap(rawLogsChannel) {
+		rawLogsChannel <- model.RawLog{BatchID: "queued"}
+	}
+	applicationContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	publisher := &fakePublisher{}
+	consumer := NewBatchConsumer(rawLogsChannel, 2, 4, fakeEnricher{}, fakeRouter{}, publisher)
+	waitForConsumer(t, consumer.Start(applicationContext))
+	if publisher.count() != 11 || len(rawLogsChannel) != 0 {
+		t.Fatalf("published %d, queued %d; want 11 published and no queued logs", publisher.count(), len(rawLogsChannel))
+	}
+}
+
+type publisherFunc func(model.EnrichedLog) error
+
+func (publish publisherFunc) Publish(log model.EnrichedLog) error { return publish(log) }
+
+type routerFunc func(model.EnrichedLog) (model.EnrichedLog, error)
+
+func (route routerFunc) Route(log model.EnrichedLog) (model.EnrichedLog, error) { return route(log) }
+
+func TestBatchConsumer_FinishesCurrentBatchAndQueuedBatches(t *testing.T) {
+	t.Parallel()
+	rawLogsChannel := make(chan model.RawLog, 5)
+	for range cap(rawLogsChannel) {
+		rawLogsChannel <- model.RawLog{BatchID: "queued"}
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var firstPublish sync.Once
+	publisher := &fakePublisher{}
+	blockingPublisher := publisherFunc(func(log model.EnrichedLog) error {
+		firstPublish.Do(func() {
+			close(entered)
+			<-release
+		})
+		return publisher.Publish(log)
+	})
+	applicationContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer := NewBatchConsumer(rawLogsChannel, 2, 1, fakeEnricher{}, fakeRouter{}, blockingPublisher)
+	completed := consumer.Start(applicationContext)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer never started publishing")
+	}
+	cancel()
+	select {
+	case <-completed:
+		t.Fatal("consumer completed while a publish was still running")
+	default:
+	}
+	unblock()
+	waitForConsumer(t, completed)
+	if publisher.count() != 5 {
+		t.Fatalf("published count = %d, want 5", publisher.count())
+	}
+}
+
+func TestBatchConsumer_LogsErrorsAndContinues(t *testing.T) {
+	var output bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	rawLogsChannel := make(chan model.RawLog, 3)
+	for _, service := range []string{"route-failure", "publish-failure", "success"} {
+		rawLogsChannel <- model.RawLog{BatchID: "batch-" + service, LogEntry: model.LogEntry{Service: service}}
+	}
+	published := &fakePublisher{}
+	route := routerFunc(func(log model.EnrichedLog) (model.EnrichedLog, error) {
+		if log.Service == "route-failure" {
+			return model.EnrichedLog{}, errors.New("route failed")
+		}
+		return log, nil
+	})
+	publish := publisherFunc(func(log model.EnrichedLog) error {
+		_ = published.Publish(log)
+		if log.Service == "publish-failure" {
+			return errors.New("publish failed")
+		}
+		return nil
+	})
+	applicationContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	waitForConsumer(t, NewBatchConsumer(rawLogsChannel, 3, 1, fakeEnricher{}, route, publish).Start(applicationContext))
+	if published.count() != 2 {
+		t.Fatalf("publish attempts = %d, want 2 (skip route failure and continue after publish failure)", published.count())
+	}
+	decoder := json.NewDecoder(&output)
+	for _, service := range []string{"route-failure", "publish-failure"} {
+		var entry map[string]any
+		if err := decoder.Decode(&entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry["level"] != "ERROR" || entry["batch_id"] != "batch-"+service || entry["service"] != service || entry["error"] == "" {
+			t.Fatalf("error log missing expected details: %v", entry)
+		}
+	}
+	if decoder.More() {
+		t.Fatal("unexpected additional error log")
 	}
 }

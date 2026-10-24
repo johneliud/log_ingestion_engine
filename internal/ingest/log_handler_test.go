@@ -7,9 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
+	"github.com/johneliud/log_ingestion_engine/internal/pipeline"
 )
 
 const testMaximumBodySizeInBytes = 1048576
@@ -261,6 +263,51 @@ func TestNewLogIngestionHandler_ReturnsErrorMessageInJSONOnErrorResponses(t *tes
 }
 
 const validEntryJSON = `{"timestamp":"2026-10-24T10:00:00Z","service":"claims","level":"ERROR","message":"timeout"}`
+
+func TestNewLogIngestionHandler_QueueAdmission(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name       string
+		capacity   int
+		prefill    int
+		body       string
+		wantStatus int
+		wantQueued int
+		wantError  string
+	}{
+		{"oversized batch", 1, 0, `[` + validEntryJSON + `,` + validEntryJSON + `]`, http.StatusRequestEntityTooLarge, 0, "batch exceeds ingestion queue capacity"},
+		{"temporary overload", 2, 1, `[` + validEntryJSON + `,` + validEntryJSON + `]`, http.StatusServiceUnavailable, 1, "ingestion overloaded"},
+		{"accepted batch", 2, 0, `[` + validEntryJSON + `,` + validEntryJSON + `]`, http.StatusAccepted, 2, ""},
+		{"only valid entries need capacity", 1, 0, `[` + validEntryJSON + `,{}]`, http.StatusAccepted, 1, ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			queue := pipeline.NewRawLogsQueue(testCase.capacity, 20*time.Millisecond)
+			if err := queue.PushBatch(make([]model.RawLog, testCase.prefill)); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(testCase.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			NewLogIngestionHandler(testMaximumBodySizeInBytes, WithRawLogPusher(queue)).ServeHTTP(response, request)
+			if response.Code != testCase.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, testCase.wantStatus, response.Body.String())
+			}
+			if len(queue.RawLogsChannel()) != testCase.wantQueued {
+				t.Fatalf("queued entries = %d, want %d", len(queue.RawLogsChannel()), testCase.wantQueued)
+			}
+			if testCase.wantError != "" {
+				var body model.ErrorResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				if body.Error != testCase.wantError {
+					t.Fatalf("error = %q, want %q", body.Error, testCase.wantError)
+				}
+			}
+		})
+	}
+}
 
 func TestNewLogIngestionHandler_PartialBatchReturnsAcceptedWithRejectedEntries(t *testing.T) {
 	t.Parallel()
