@@ -22,7 +22,7 @@ func TestNewRateLimitMiddleware_CallsHandlerWhenAllowed(t *testing.T) {
 	t.Parallel()
 	handlerCalled := false
 	fake := &fakeLimiter{allowed: true}
-	middleware := NewRateLimitMiddleware(fake, func(responseWriter http.ResponseWriter, statusCode int, errorMessage string) {})
+	middleware := NewRateLimitMiddleware(fake, func(responseWriter http.ResponseWriter, statusCode int, errorMessage string) {}, nil)
 	handler := middleware(func(responseWriter http.ResponseWriter, request *http.Request) {
 		handlerCalled = true
 		responseWriter.WriteHeader(http.StatusAccepted)
@@ -49,7 +49,7 @@ func TestNewRateLimitMiddleware_Returns429AndNeverCallsHandlerWhenRejected(t *te
 		responseWriter.Header().Set("Content-Type", "application/json")
 		responseWriter.WriteHeader(statusCode)
 		responseWriter.Write([]byte(`{"error":"` + errorMessage + `"}`))
-	})
+	}, nil)
 	handler := middleware(func(responseWriter http.ResponseWriter, request *http.Request) {
 		handlerCalled = true
 		responseWriter.WriteHeader(http.StatusAccepted)
@@ -76,7 +76,7 @@ func TestNewRateLimitMiddleware_SetsRetryAfterToAtLeastOneSecond(t *testing.T) {
 	fake := &fakeLimiter{allowed: false, delay: 100 * time.Millisecond}
 	middleware := NewRateLimitMiddleware(fake, func(responseWriter http.ResponseWriter, statusCode int, errorMessage string) {
 		responseWriter.WriteHeader(statusCode)
-	})
+	}, nil)
 	handler := middleware(func(responseWriter http.ResponseWriter, request *http.Request) {})
 
 	request := httptest.NewRequest(http.MethodPost, "/logs", nil)
