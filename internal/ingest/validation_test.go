@@ -350,3 +350,69 @@ func TestValidateLogEntries_AllInvalidReturnsZeroValidAndAllRejected(t *testing.
 		t.Errorf("second rejected entry index = %d, want 1", rejectedEntries[1].Index)
 	}
 }
+
+func TestValidateLogEntry_ServiceLengthCountsRunesNotBytes(t *testing.T) {
+	t.Parallel()
+	cjkCharacter := "中"
+	testCases := []struct {
+		name               string
+		lengthInCharacters int
+		expectValid        bool
+	}{
+		{"accepts 100 multibyte characters at the service limit", 100, true},
+		{"rejects 101 multibyte characters over the service limit", 101, false},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			entry := aValidLogEntry()
+			entry.Service = strings.Repeat(cjkCharacter, testCase.lengthInCharacters)
+			fieldErrors := validateLogEntry(entry)
+			serviceError := errorMessageForField(fieldErrors, "service")
+
+			if testCase.expectValid {
+				if serviceError != "" {
+					t.Errorf("expected no service error at %d runes (%d bytes), got %q", testCase.lengthInCharacters, len(entry.Service), serviceError)
+				}
+			} else {
+				if serviceError == "" {
+					t.Errorf("expected a service error at %d runes (%d bytes), got none", testCase.lengthInCharacters, len(entry.Service))
+				}
+			}
+		})
+	}
+}
+
+func TestValidateLogEntry_MessageLengthCountsRunesNotBytes(t *testing.T) {
+	t.Parallel()
+	cjkCharacter := "文"
+	testCases := []struct {
+		name               string
+		lengthInCharacters int
+		expectValid        bool
+	}{
+		{"accepts 10000 multibyte characters at the message limit", 10000, true},
+		{"rejects 10001 multibyte characters over the message limit", 10001, false},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			entry := aValidLogEntry()
+			entry.Message = strings.Repeat(cjkCharacter, testCase.lengthInCharacters)
+			fieldErrors := validateLogEntry(entry)
+			messageError := errorMessageForField(fieldErrors, "message")
+
+			if testCase.expectValid {
+				if messageError != "" {
+					t.Errorf("expected no message error at %d runes (%d bytes), got %q", testCase.lengthInCharacters, len(entry.Message), messageError)
+				}
+			} else {
+				if messageError == "" {
+					t.Errorf("expected a message error at %d runes (%d bytes), got none", testCase.lengthInCharacters, len(entry.Message))
+				}
+			}
+		})
+	}
+}

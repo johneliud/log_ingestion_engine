@@ -58,9 +58,12 @@ func TestBatchConsumer_ProcessesBatchesThroughEnrichmentAndRouting(t *testing.T)
 	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims", Level: model.LogLevelError, Message: "x", Timestamp: "2026-10-24T10:00:00Z"}}
 	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "billing", Level: model.LogLevelInfo, Message: "y", Timestamp: "2026-10-24T10:00:01Z"}}
 
-	time.Sleep(200 * time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for publisher.count() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	applicationContextCancellation()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	if publisher.count() != 2 {
 		t.Fatalf("published count = %d, want 2", publisher.count())
