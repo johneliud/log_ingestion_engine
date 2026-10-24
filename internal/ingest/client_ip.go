@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// Returns the source IP from X-Forwarded-For when present, otherwise the socket address host, otherwise unknown.
-func resolveClientIP(request *http.Request) string {
+// ResolveClientIP returns the source IP from X-Forwarded-For when present, otherwise the socket address host, otherwise unknown. X-Forwarded-For is client-controlled unless a trusted proxy overwrites it.
+func ResolveClientIP(request *http.Request) string {
 	if request == nil {
 		return "unknown"
 	}
