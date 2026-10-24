@@ -34,7 +34,7 @@ All settings come from environment variables with documented defaults in `config
 
 ## Client IP resolution
 
-Client IP is taken from the first entry of `X-Forwarded-For` (trimmed, ignoring an empty first entry), otherwise the socket address host, otherwise `"unknown"`. `X-Forwarded-For` is client-controlled unless a trusted proxy overwrites it. The same function is used by the rate-limit middleware and for capturing `source_ip`. All `"unknown"` callers share one bucket. The limiter is in-memory and single-instance (lost on restart).
+Client IP is taken from the first entry of `X-Forwarded-For` (trimmed, validated as an IP, ignoring an empty or invalid first entry) when a trusted proxy forwarded the request, otherwise from the socket address host, otherwise `"unknown"`. `X-Forwarded-For` is client-controlled and only honored when the request comes from a configured trusted proxy; without one, the socket address host is used. The same function is used by the rate-limit middleware and for capturing `source_ip`. All `"unknown"` callers share one bucket. The limiter is in-memory and single-instance (lost on restart).
 
 ## Tests
 
