@@ -262,7 +262,7 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 			environmentMutation: func(environmentVariables map[string]string) {
 				environmentVariables[environmentNameHTTPPort] = "70000"
 			},
-			expectedErrorSubstrings: []string{"HTTP_PORT", "TCP port between 1 and 65535"},
+			expectedErrorSubstrings: []string{"HTTP_PORT", "TCP port between 1024 and 65535"},
 		},
 		{
 			name: "rabbitmq port is missing",
@@ -276,7 +276,7 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 			environmentMutation: func(environmentVariables map[string]string) {
 				environmentVariables[environmentNameRabbitMQPort] = "65536"
 			},
-			expectedErrorSubstrings: []string{"RABBITMQ_PORT", "TCP port between 1 and 65535"},
+			expectedErrorSubstrings: []string{"RABBITMQ_PORT", "TCP port between 1024 and 65535"},
 		},
 		{
 			name: "rabbitmq host is missing",

@@ -44,7 +44,7 @@ const (
 	defaultConsumerBatchSize                = 50
 	defaultChannelSendTimeout               = 100 * time.Millisecond
 	defaultMaximumBodySizeInBytes           = 1048576
-	defaultApplicationEnvironment           = "development"
+	defaultApplicationEnvironment           = "production"
 	defaultRoutingConfigurationFilePath     = "configs/routing.json"
 	service1Destination                     = "service1"
 	defaultPublishTimeout                   = 5 * time.Second
