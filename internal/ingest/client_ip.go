@@ -3,41 +3,71 @@ package ingest
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 )
 
-// ResolveClientIP returns the source IP from X-Forwarded-For when present, otherwise the socket address host, otherwise unknown. X-Forwarded-For is client-controlled unless a trusted proxy overwrites it.
-func ResolveClientIP(request *http.Request) string {
+// Returns the source IP from X-ForwardedFor when a trusted proxy forwarded the request and the first forwarded entry is a valid IP, otherwise the socket address host, otherwise unknown. X-ForwardedFor is client-controlled unless a trusted proxy overwrites it.
+func ResolveClientIP(request *http.Request, trustedProxies []string) string {
 	if request == nil {
 		return "unknown"
 	}
 
-	forwardedHeader := request.Header.Get("X-Forwarded-For")
-	if forwardedHeader != "" {
+	sourceIPAddress := chooseSocketAddressHost(request)
+
+	if forwardedHeader := request.Header.Get("X-ForwardedFor"); forwardedHeader != "" && hasForwardedFromTrustedProxy(request, trustedProxies) {
 		forwardedEntries := strings.Split(forwardedHeader, ",")
-		if len(forwardedEntries) > 0 {
-			firstEntry := strings.TrimSpace(forwardedEntries[0])
-			if firstEntry != "" {
-				return firstEntry
-			}
+		firstEntry := strings.TrimSpace(forwardedEntries[0])
+		if parsedAddress, parseError := netip.ParseAddr(firstEntry); parseError == nil {
+			sourceIPAddress = parsedAddress.String()
 		}
 	}
 
+	return sourceIPAddress
+}
+
+// Returns the host portion of the socket address, or unknown when the address is absent.
+func chooseSocketAddressHost(request *http.Request) string {
 	if request.RemoteAddr == "" {
 		return "unknown"
 	}
 
 	host, _, splitError := net.SplitHostPort(request.RemoteAddr)
-	if splitError == nil {
-		if host == "" {
-			return "unknown"
-		}
-		return host
+	if splitError != nil {
+		return request.RemoteAddr
 	}
-
-	if request.RemoteAddr == "" {
+	if host == "" {
 		return "unknown"
 	}
 
-	return request.RemoteAddr
+	return host
+}
+
+// Returns whether a trusted proxy forwarded the request.
+func hasForwardedFromTrustedProxy(request *http.Request, trustedProxies []string) bool {
+	if len(trustedProxies) == 0 {
+		return false
+	}
+
+	peerAddress := request.RemoteAddr
+	if host, _, splitError := net.SplitHostPort(peerAddress); splitError == nil {
+		peerAddress = host
+	}
+
+	peerAddressValue, peerAddressParseError := netip.ParseAddr(peerAddress)
+	if peerAddressParseError != nil {
+		return false
+	}
+
+	for _, trustedProxy := range trustedProxies {
+		prefix, prefixParseError := netip.ParsePrefix(trustedProxy)
+		if prefixParseError != nil {
+			continue
+		}
+		if prefix.Contains(peerAddressValue) {
+			return true
+		}
+	}
+
+	return false
 }

@@ -5,14 +5,38 @@ import (
 	"testing"
 )
 
+func TestResolveClientIP_ReturnsSocketAddressWhenNoTrustedProxyIsConfigured(t *testing.T) {
+	t.Parallel()
+	request := &http.Request{
+		Header:     make(http.Header),
+		RemoteAddr: "192.168.1.10:12345",
+	}
+	request.Header.Set("X-ForwardedFor", "203.0.113.5")
+	if got := ResolveClientIP(request, nil); got != "192.168.1.10" {
+		t.Errorf("ResolveClientIP() = %q, want %q", got, "192.168.1.10")
+	}
+}
+
+func TestResolveClientIP_ReturnsSocketAddressWhenForwardedEntryIsNotAnIP(t *testing.T) {
+	t.Parallel()
+	request := &http.Request{
+		Header:     make(http.Header),
+		RemoteAddr: "192.168.1.10:12345",
+	}
+	request.Header.Set("X-ForwardedFor", "not-an-ip")
+	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "192.168.1.10" {
+		t.Errorf("ResolveClientIP() = %q, want %q", got, "192.168.1.10")
+	}
+}
+
 func TestResolveClientIP_PrefersFirstEntryFromXForwardedFor(t *testing.T) {
 	t.Parallel()
 	request := &http.Request{
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-Forwarded-For", "203.0.113.5, 198.51.100.2")
-	if got := ResolveClientIP(request); got != "203.0.113.5" {
+	request.Header.Set("X-ForwardedFor", "203.0.113.5, 198.51.100.2")
+	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "203.0.113.5" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "203.0.113.5")
 	}
 }
@@ -23,8 +47,8 @@ func TestResolveClientIP_TrimsWhitespaceFromXForwardedForEntry(t *testing.T) {
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-Forwarded-For", "  203.0.113.7  , 198.51.100.3")
-	if got := ResolveClientIP(request); got != "203.0.113.7" {
+	request.Header.Set("X-ForwardedFor", "  203.0.113.7  , 198.51.100.3")
+	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "203.0.113.7" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "203.0.113.7")
 	}
 }
@@ -35,8 +59,8 @@ func TestResolveClientIP_IgnoresEmptyFirstEntryInXForwardedForList(t *testing.T)
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-Forwarded-For", " , 198.51.100.4")
-	if got := ResolveClientIP(request); got != "192.168.1.10" {
+	request.Header.Set("X-ForwardedFor", " , 198.51.100.4")
+	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "192.168.1.10" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "192.168.1.10")
 	}
 }
@@ -47,7 +71,7 @@ func TestResolveClientIP_UsesSocketAddressHostWhenHeaderMissing(t *testing.T) {
 		Header:     make(http.Header),
 		RemoteAddr: "203.0.113.9:54321",
 	}
-	if got := ResolveClientIP(request); got != "203.0.113.9" {
+	if got := ResolveClientIP(request, nil); got != "203.0.113.9" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "203.0.113.9")
 	}
 }
@@ -58,7 +82,7 @@ func TestResolveClientIP_UsesSocketAddressWhenNoPort(t *testing.T) {
 		Header:     make(http.Header),
 		RemoteAddr: "203.0.113.11",
 	}
-	if got := ResolveClientIP(request); got != "203.0.113.11" {
+	if got := ResolveClientIP(request, nil); got != "203.0.113.11" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "203.0.113.11")
 	}
 }
@@ -68,11 +92,11 @@ func TestResolveClientIP_ReturnsUnknownWhenNothingKnown(t *testing.T) {
 	request := &http.Request{
 		Header: make(http.Header),
 	}
-	if got := ResolveClientIP(request); got != "unknown" {
+	if got := ResolveClientIP(request, nil); got != "unknown" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "unknown")
 	}
 
-	if got := ResolveClientIP(nil); got != "unknown" {
+	if got := ResolveClientIP(nil, nil); got != "unknown" {
 		t.Errorf("ResolveClientIP(nil) = %q, want %q", got, "unknown")
 	}
 }
