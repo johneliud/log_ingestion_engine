@@ -11,12 +11,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
+	"github.com/johneliud/log_ingestion_engine/internal/pipeline"
 )
 
 const applicationJSONMediaType = "application/json"
 
 type rawLogPusher interface {
-	PushBatch([]model.RawLog) bool
+	PushBatch([]model.RawLog) error
 }
 
 // Returns an HTTP handler that validates a JSON array of log entries and responds with a batch identifier plus any per-entry rejection details.
@@ -91,7 +92,11 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 				})
 			}
 
-			if !handlerConfiguration.rawLogPusher.PushBatch(rawLogs) {
+			if pushError := handlerConfiguration.rawLogPusher.PushBatch(rawLogs); pushError != nil {
+				if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
+					writeJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
+					return
+				}
 				writeJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
 				return
 			}

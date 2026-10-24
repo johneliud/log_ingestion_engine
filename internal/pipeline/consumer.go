@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -43,20 +44,15 @@ func NewBatchConsumer(rawLogsChannel <-chan model.RawLog, consumerBatchSize int,
 }
 
 // Starts workers that process batches until context is done and channel is drained.
-func (batchConsumer *BatchConsumer) Start(applicationContext context.Context) {
+func (batchConsumer *BatchConsumer) Start(applicationContext context.Context) <-chan struct{} {
+	completed := make(chan struct{})
 	var waitGroup sync.WaitGroup
 	waitGroup.Add(batchConsumer.workerCount)
 	for workerIndex := 0; workerIndex < batchConsumer.workerCount; workerIndex++ {
 		go func() {
 			defer waitGroup.Done()
 			for {
-				select {
-				case <-applicationContext.Done():
-					return
-				default:
-				}
-
-				batch := batchConsumer.collectBatch(applicationContext)
+				batch := batchConsumer.collectBatch()
 				if len(batch) == 0 {
 					select {
 					case <-applicationContext.Done():
@@ -68,18 +64,16 @@ func (batchConsumer *BatchConsumer) Start(applicationContext context.Context) {
 				}
 
 				for _, rawLog := range batch {
-					select {
-					case <-applicationContext.Done():
-						return
-					default:
-					}
 					enrichedLog := batchConsumer.enricher.Enrich(rawLog)
 					routedLog, routeError := batchConsumer.router.Route(enrichedLog)
 					if routeError != nil {
+						slog.Error("routing log failed", "error", routeError, "batch_id", enrichedLog.BatchID, "service", enrichedLog.Service)
 						continue
 					}
 					if batchConsumer.queuePublisher != nil {
-						_ = batchConsumer.queuePublisher.Publish(routedLog)
+						if publishError := batchConsumer.queuePublisher.Publish(routedLog); publishError != nil {
+							slog.Error("publishing log failed", "error", publishError, "batch_id", routedLog.BatchID, "service", routedLog.Service)
+						}
 					}
 				}
 			}
@@ -87,15 +81,15 @@ func (batchConsumer *BatchConsumer) Start(applicationContext context.Context) {
 	}
 	go func() {
 		waitGroup.Wait()
+		close(completed)
 	}()
+	return completed
 }
 
-func (batchConsumer *BatchConsumer) collectBatch(applicationContext context.Context) []model.RawLog {
+func (batchConsumer *BatchConsumer) collectBatch() []model.RawLog {
 	batch := make([]model.RawLog, 0, batchConsumer.consumerBatchSize)
 	for len(batch) < batchConsumer.consumerBatchSize {
 		select {
-		case <-applicationContext.Done():
-			return batch
 		case rawLog, channelOpen := <-batchConsumer.rawLogsChannel:
 			if !channelOpen {
 				return batch

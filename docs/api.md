@@ -27,6 +27,8 @@ Each log entry object:
 | 400    | All entries invalid                | `AllEntriesRejectedResponse` with per-entry errors                      |
 | 400    | Empty body, null, or non-array     | `{"error":"..."}`                                                        |
 | 413    | Body over configured limit         | `{"error":"request body exceeds the maximum allowed size"}`              |
+| 413    | Valid entries exceed queue capacity | `{"error":"batch exceeds ingestion queue capacity"}`                     |
+| 503    | Queue remains overloaded until timeout | `{"error":"ingestion overloaded"}`                                  |
 | 415    | Content type not application/json  | `{"error":"content type must be application/json"}`                      |
 
 ### Response shapes
