@@ -44,3 +44,29 @@ func validateLogEntry(logEntry model.LogEntry) []model.FieldError {
 
 	return fieldErrors
 }
+
+// Separates valid entries from rejected entries, preserving the original array index for each rejection.
+func validateLogEntries(logEntries []model.LogEntry) (validEntries []model.LogEntry, rejectedEntries []model.RejectedEntry) {
+	for entryIndex, logEntry := range logEntries {
+		fieldErrors := validateLogEntry(logEntry)
+		if len(fieldErrors) > 0 {
+			rejectedEntries = append(rejectedEntries, model.RejectedEntry{
+				Index:  entryIndex,
+				Errors: fieldErrors,
+			})
+		} else {
+			validEntries = append(validEntries, logEntry)
+		}
+	}
+	return validEntries, rejectedEntries
+}
+
+// Reports whether the given level is one of the accepted log levels.
+func isValidLogLevel(level model.LogLevel) bool {
+	switch level {
+	case model.LogLevelInfo, model.LogLevelWarn, model.LogLevelError, model.LogLevelDebug:
+		return true
+	default:
+		return false
+	}
+}
