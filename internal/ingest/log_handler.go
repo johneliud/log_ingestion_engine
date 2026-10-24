@@ -78,7 +78,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 		}
 
 		if handlerConfiguration.rawLogPusher != nil && len(validEntries) > 0 {
-			sourceIP := ResolveClientIP(request)
+			sourceIP := ResolveClientIP(request, handlerConfiguration.trustedProxies)
 			receivedAt := handlerConfiguration.currentTimeProvider()
 			batchID := uuid.NewString()
 			rawLogs := make([]model.RawLog, 0, len(validEntries))
@@ -121,6 +121,7 @@ type logIngestionHandlerConfiguration struct {
 	maximumBodySizeInBytes int
 	rawLogPusher           rawLogPusher
 	currentTimeProvider    func() time.Time
+	trustedProxies         []string
 }
 
 // LogIngestionHandlerOption configures the log ingestion handler.
@@ -139,5 +140,12 @@ func WithCurrentTimeProviderForIngestion(currentTimeProvider func() time.Time) L
 		if currentTimeProvider != nil {
 			configuration.currentTimeProvider = currentTimeProvider
 		}
+	}
+}
+
+// Returns the trusted proxy CIDRs used when resolving the client IP from forwarded headers.
+func WithTrustedProxies(trustedProxies []string) LogIngestionHandlerOption {
+	return func(configuration *logIngestionHandlerConfiguration) {
+		configuration.trustedProxies = trustedProxies
 	}
 }
