@@ -60,6 +60,33 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int) http.HandlerFunc {
 			return
 		}
 
+		if handlerConfiguration.rawLogPusher != nil && len(validEntries) > 0 {
+			sourceIP := ResolveClientIP(request)
+			receivedAt := handlerConfiguration.currentTimeProvider()
+			batchID := uuid.NewString()
+			rawLogs := make([]model.RawLog, 0, len(validEntries))
+
+			for _, validEntry := range validEntries {
+				rawLogs = append(rawLogs, model.RawLog{
+					LogEntry:   validEntry,
+					BatchID:    batchID,
+					SourceIP:   sourceIP,
+					ReceivedAt: receivedAt,
+				})
+			}
+			
+			if !handlerConfiguration.rawLogPusher.PushBatch(rawLogs) {
+				writeJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
+				return
+			}
+			writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
+				Status:   "accepted",
+				BatchID:  batchID,
+				Rejected: rejectedEntries,
+			})
+			return
+		}
+
 		batchID := uuid.NewString()
 		writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
 			Status:   "accepted",
