@@ -14,7 +14,7 @@ import (
 
 const applicationJSONMediaType = "application/json"
 
-// Returns an HTTP handler that accepts a JSON array of log entries and responds with a batch identifier.
+// Returns an HTTP handler that validates a JSON array of log entries and responds with a batch identifier plus any per-entry rejection details.
 func NewLogIngestionHandler(maximumBodySizeInBytes int) http.HandlerFunc {
 	return func(responseWriter http.ResponseWriter, request *http.Request) {
 		mediaType, _, parseError := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -40,7 +40,6 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int) http.HandlerFunc {
 		}
 
 		var logEntries []model.LogEntry
-		
 		if jsonError := json.Unmarshal(requestBody, &logEntries); jsonError != nil {
 			writeJSONError(responseWriter, http.StatusBadRequest, fmt.Sprintf("malformed JSON: %s", jsonError.Error()))
 			return
@@ -51,10 +50,21 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int) http.HandlerFunc {
 			return
 		}
 
+		validEntries, rejectedEntries := validateLogEntries(logEntries)
+
+		if len(logEntries) > 0 && len(validEntries) == 0 {
+			writeJSONResponse(responseWriter, http.StatusBadRequest, model.AllEntriesRejectedResponse{
+				Status:   "rejected",
+				Rejected: rejectedEntries,
+			})
+			return
+		}
+
 		batchID := uuid.NewString()
 		writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
-			Status:  "accepted",
-			BatchID: batchID,
+			Status:   "accepted",
+			BatchID:  batchID,
+			Rejected: rejectedEntries,
 		})
 	}
 }

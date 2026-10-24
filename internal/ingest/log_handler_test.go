@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -257,4 +258,142 @@ func TestNewLogIngestionHandler_ReturnsErrorMessageInJSONOnErrorResponses(t *tes
 			}
 		})
 	}
+}
+
+const validEntryJSON = `{"timestamp":"2026-10-24T10:00:00Z","service":"claims","level":"ERROR","message":"timeout"}`
+
+func TestNewLogIngestionHandler_PartialBatchReturnsAcceptedWithRejectedEntries(t *testing.T) {
+	t.Parallel()
+	requestBody := fmt.Sprintf(
+		`[%s,{"timestamp":"2026-10-24T10:00:00Z","service":"claims","level":"TRACE","message":"bad level"},%s]`,
+		validEntryJSON, validEntryJSON,
+	)
+	responseRecorder := sendLogIngestionRequest(t, requestBody, "application/json", testMaximumBodySizeInBytes)
+
+	if responseRecorder.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want %d (body: %s)", responseRecorder.Code, http.StatusAccepted, responseRecorder.Body.String())
+	}
+
+	var acceptedResponse model.AcceptedResponse
+	if jsonError := json.Unmarshal(responseRecorder.Body.Bytes(), &acceptedResponse); jsonError != nil {
+		t.Fatalf("could not parse the accepted response: %v", jsonError)
+	}
+
+	if acceptedResponse.Status != "accepted" {
+		t.Errorf("status = %q, want %q", acceptedResponse.Status, "accepted")
+	}
+
+	if _, parseError := uuid.Parse(acceptedResponse.BatchID); parseError != nil {
+		t.Errorf("batchId %q is not a valid UUID: %v", acceptedResponse.BatchID, parseError)
+	}
+
+	if len(acceptedResponse.Rejected) != 1 {
+		t.Fatalf("rejected entries = %d, want 1", len(acceptedResponse.Rejected))
+	}
+
+	if acceptedResponse.Rejected[0].Index != 1 {
+		t.Errorf("rejected entry index = %d, want 1", acceptedResponse.Rejected[0].Index)
+	}
+
+	if len(acceptedResponse.Rejected[0].Errors) != 1 {
+		t.Fatalf("rejected entry error count = %d, want 1", len(acceptedResponse.Rejected[0].Errors))
+	}
+
+	if acceptedResponse.Rejected[0].Errors[0].Field != "level" {
+		t.Errorf("rejected entry error field = %q, want %q", acceptedResponse.Rejected[0].Errors[0].Field, "level")
+	}
+}
+
+func TestNewLogIngestionHandler_AllEntriesInvalidReturns400WithPerEntryErrors(t *testing.T) {
+	t.Parallel()
+	requestBody := `[
+		{"timestamp":"not-a-timestamp","service":"claims","level":"ERROR","message":"timeout"},
+		{"timestamp":"2026-10-24T10:00:00Z","service":"claims","level":"TRACE","message":"bad level"}
+	]`
+	responseRecorder := sendLogIngestionRequest(t, requestBody, "application/json", testMaximumBodySizeInBytes)
+
+	if responseRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d (body: %s)", responseRecorder.Code, http.StatusBadRequest, responseRecorder.Body.String())
+	}
+
+	var rejectedResponse model.AllEntriesRejectedResponse
+	if jsonError := json.Unmarshal(responseRecorder.Body.Bytes(), &rejectedResponse); jsonError != nil {
+		t.Fatalf("could not parse the rejected response: %v", jsonError)
+	}
+
+	if rejectedResponse.Status != "rejected" {
+		t.Errorf("status = %q, want %q", rejectedResponse.Status, "rejected")
+	}
+
+	if len(rejectedResponse.Rejected) != 2 {
+		t.Fatalf("rejected entries = %d, want 2", len(rejectedResponse.Rejected))
+	}
+
+	if rejectedResponse.Rejected[0].Index != 0 {
+		t.Errorf("first rejected entry index = %d, want 0", rejectedResponse.Rejected[0].Index)
+	}
+
+	if rejectedResponse.Rejected[1].Index != 1 {
+		t.Errorf("second rejected entry index = %d, want 1", rejectedResponse.Rejected[1].Index)
+	}
+
+	timestampErrorMessage := errorMessageForFieldInRejected(rejectedResponse.Rejected[0].Errors, "timestamp")
+	if timestampErrorMessage == "" {
+		t.Errorf("expected a timestamp error for the first rejected entry, but none was found")
+	}
+
+	levelErrorMessage := errorMessageForFieldInRejected(rejectedResponse.Rejected[1].Errors, "level")
+	if levelErrorMessage == "" {
+		t.Errorf("expected a level error for the second rejected entry, but none was found")
+	}
+}
+
+func TestNewLogIngestionHandler_AllValidEntriesReturnAcceptedWithoutRejectedField(t *testing.T) {
+	t.Parallel()
+	requestBody := fmt.Sprintf(`[%s,%s]`, validEntryJSON, validEntryJSON)
+	responseRecorder := sendLogIngestionRequest(t, requestBody, "application/json", testMaximumBodySizeInBytes)
+
+	if responseRecorder.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want %d", responseRecorder.Code, http.StatusAccepted)
+	}
+
+	if strings.Contains(responseRecorder.Body.String(), "rejected") {
+		t.Errorf("response body should not contain a rejected field when all entries are valid, but got: %s", responseRecorder.Body.String())
+	}
+}
+
+func TestNewLogIngestionHandler_PartialBatchWithMultipleFieldErrorsReturnsAllErrorsForRejectedEntry(t *testing.T) {
+	t.Parallel()
+	requestBody := fmt.Sprintf(
+		`[%s,{"timestamp":"bad","service":"","level":"TRACE","message":""}]`,
+		validEntryJSON,
+	)
+	responseRecorder := sendLogIngestionRequest(t, requestBody, "application/json", testMaximumBodySizeInBytes)
+
+	if responseRecorder.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want %d", responseRecorder.Code, http.StatusAccepted)
+	}
+
+	var acceptedResponse model.AcceptedResponse
+	if jsonError := json.Unmarshal(responseRecorder.Body.Bytes(), &acceptedResponse); jsonError != nil {
+		t.Fatalf("could not parse the accepted response: %v", jsonError)
+	}
+
+	if len(acceptedResponse.Rejected) != 1 {
+		t.Fatalf("rejected entries = %d, want 1", len(acceptedResponse.Rejected))
+	}
+
+	if len(acceptedResponse.Rejected[0].Errors) != 4 {
+		t.Errorf("rejected entry error count = %d, want 4 (timestamp, service, level, message)", len(acceptedResponse.Rejected[0].Errors))
+	}
+}
+
+// Finds the error message for the given field name within a slice of rejected-entry field errors.
+func errorMessageForFieldInRejected(fieldErrors []model.FieldError, fieldName string) string {
+	for _, fieldError := range fieldErrors {
+		if fieldError.Field == fieldName {
+			return fieldError.Message
+		}
+	}
+	return ""
 }
