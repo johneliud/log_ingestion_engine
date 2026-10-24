@@ -1,5 +1,7 @@
 # Log Ingestion Engine
 
+[![CI](https://github.com/johneliud/log_ingestion_engine/actions/workflows/ci.yml/badge.svg)](https://github.com/johneliud/log_ingestion_engine/actions/workflows/ci.yml)
+
 A Go service that accepts logs over HTTP, validates and enriches them, routes them through RabbitMQ, stores them in SQLite and reports metrics.
 
 ## Clone
