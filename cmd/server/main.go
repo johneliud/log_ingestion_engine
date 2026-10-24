@@ -13,6 +13,7 @@ import (
 
 	"github.com/johneliud/log_ingestion_engine/internal/config"
 	"github.com/johneliud/log_ingestion_engine/internal/handler"
+	"github.com/johneliud/log_ingestion_engine/internal/ingest"
 )
 
 const shutdownGracePeriod = 5 * time.Second
@@ -44,11 +45,15 @@ func logConfigurationSummary(applicationConfiguration config.ApplicationConfigur
 	)
 }
 
-// Serves a placeholder response until the context is cancelled, then shuts the server down within the shutdown grace period.
+// Serves the root endpoint and POST /logs handler until the context is cancelled, then shuts the server down within the shutdown grace period.
 func runHTTPServerUntilContextIsCancelled(applicationContext context.Context, applicationConfiguration config.ApplicationConfiguration) error {
+	requestRouter := http.NewServeMux()
+	requestRouter.HandleFunc("POST /logs", ingest.NewLogIngestionHandler(applicationConfiguration.MaximumBodySizeInBytes))
+	requestRouter.HandleFunc("/", handler.RootEndpointHandler())
+
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", applicationConfiguration.HTTPPort),
-		Handler: handler.RootEndpointHandler(),
+		Handler: requestRouter,
 	}
 
 	serverListenErrorChannel := make(chan error, 1)
