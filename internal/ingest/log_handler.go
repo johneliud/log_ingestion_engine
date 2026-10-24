@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
@@ -14,8 +15,23 @@ import (
 
 const applicationJSONMediaType = "application/json"
 
+type rawLogPusher interface {
+	PushBatch([]model.RawLog) bool
+}
+
 // Returns an HTTP handler that validates a JSON array of log entries and responds with a batch identifier plus any per-entry rejection details.
-func NewLogIngestionHandler(maximumBodySizeInBytes int) http.HandlerFunc {
+func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionHandlerOption) http.HandlerFunc {
+	handlerConfiguration := logIngestionHandlerConfiguration{
+		maximumBodySizeInBytes: maximumBodySizeInBytes,
+		currentTimeProvider:    time.Now,
+	}
+
+	for _, option := range options {
+		if option != nil {
+			option(&handlerConfiguration)
+		}
+	}
+
 	return func(responseWriter http.ResponseWriter, request *http.Request) {
 		mediaType, _, parseError := mime.ParseMediaType(request.Header.Get("Content-Type"))
 		if parseError != nil || mediaType != applicationJSONMediaType {
@@ -23,7 +39,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int) http.HandlerFunc {
 			return
 		}
 
-		request.Body = http.MaxBytesReader(responseWriter, request.Body, int64(maximumBodySizeInBytes))
+		request.Body = http.MaxBytesReader(responseWriter, request.Body, int64(handlerConfiguration.maximumBodySizeInBytes))
 		requestBody, readError := io.ReadAll(request.Body)
 		if readError != nil {
 			if _, isMaxBytesError := errors.AsType[*http.MaxBytesError](readError); isMaxBytesError {
