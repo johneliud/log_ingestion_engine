@@ -3,6 +3,7 @@ package ingest
 import (
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 )
@@ -26,7 +27,7 @@ func validateLogEntry(logEntry model.LogEntry) []model.FieldError {
 
 	if logEntry.Service == "" {
 		fieldErrors = append(fieldErrors, model.FieldError{Field: "service", Message: "service is required"})
-	} else if len(logEntry.Service) > maximumServiceLengthInCharacters {
+	} else if utf8.RuneCountInString(logEntry.Service) > maximumServiceLengthInCharacters {
 		fieldErrors = append(fieldErrors, model.FieldError{Field: "service", Message: fmt.Sprintf("service must be at most %d characters", maximumServiceLengthInCharacters)})
 	}
 
@@ -38,7 +39,7 @@ func validateLogEntry(logEntry model.LogEntry) []model.FieldError {
 
 	if logEntry.Message == "" {
 		fieldErrors = append(fieldErrors, model.FieldError{Field: "message", Message: "message is required"})
-	} else if len(logEntry.Message) > maximumMessageLengthInCharacters {
+	} else if utf8.RuneCountInString(logEntry.Message) > maximumMessageLengthInCharacters {
 		fieldErrors = append(fieldErrors, model.FieldError{Field: "message", Message: fmt.Sprintf("message must be at most %d characters", maximumMessageLengthInCharacters)})
 	}
 
