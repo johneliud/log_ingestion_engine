@@ -68,3 +68,28 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int) http.HandlerFunc {
 		})
 	}
 }
+
+type logIngestionHandlerConfiguration struct {
+	maximumBodySizeInBytes int
+	rawLogPusher           rawLogPusher
+	currentTimeProvider    func() time.Time
+}
+
+// LogIngestionHandlerOption configures the log ingestion handler.
+type LogIngestionHandlerOption func(*logIngestionHandlerConfiguration)
+
+// WithRawLogPusher configures the raw log pusher.
+func WithRawLogPusher(rawLogPusher rawLogPusher) LogIngestionHandlerOption {
+	return func(configuration *logIngestionHandlerConfiguration) {
+		configuration.rawLogPusher = rawLogPusher
+	}
+}
+
+// WithCurrentTimeProviderForIngestion configures the time provider.
+func WithCurrentTimeProviderForIngestion(currentTimeProvider func() time.Time) LogIngestionHandlerOption {
+	return func(configuration *logIngestionHandlerConfiguration) {
+		if currentTimeProvider != nil {
+			configuration.currentTimeProvider = currentTimeProvider
+		}
+	}
+}
