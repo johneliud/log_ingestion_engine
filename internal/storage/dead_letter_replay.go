@@ -34,13 +34,13 @@ func ReplayDeadLetters(deadLetterFilePath string, replaySink func(enrichedLog mo
 		if unmarshalError := json.Unmarshal(line, &deadLetterEntry); unmarshalError != nil {
 			return replayedLogCount, fmt.Errorf("parsing dead letter entry: %w", unmarshalError)
 		}
-		
+
 		if replayError := replaySink(deadLetterEntry.Log); replayError != nil {
 			return replayedLogCount, fmt.Errorf("replaying dead letter entry: %w", replayError)
 		}
 		replayedLogCount++
 	}
-	
+
 	if scanError := lineScanner.Err(); scanError != nil {
 		return replayedLogCount, fmt.Errorf("reading dead letter file %q: %w", deadLetterFilePath, scanError)
 	}

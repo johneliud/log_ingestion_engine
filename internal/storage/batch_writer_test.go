@@ -194,6 +194,36 @@ func TestBatchWriter_RetriesAtConfiguredBackoffIntervalsAndTracksRetryCount(t *t
 	}
 }
 
+func TestBatchWriterDeadLettersWhenRetryWaitIsCancelled(t *testing.T) {
+	t.Parallel()
+	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
+	defer applicationContextCancellation()
+	applicationContextCancellation()
+
+	var deadLetteredEntries []model.DeadLetterEntry
+	batchWriter := NewBatchWriter(BatchWriterDependencies{
+		ApplicationContext: applicationContext,
+		WriteBatchSize:     1,
+		RetryBackoffDelays: []time.Duration{time.Second},
+		StoreBatch:         aFailingBatchStore(make(chan []model.EnrichedLog, 10)),
+		WaitForRetryDelay: func(applicationContext context.Context, retryDelay time.Duration) error {
+			return applicationContext.Err()
+		},
+		DeadLetterSink: func(deadLetterEntry model.DeadLetterEntry) error {
+			deadLetteredEntries = append(deadLetteredEntries, deadLetterEntry)
+			return nil
+		},
+	})
+
+	storeError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog()})
+	if storeError != nil {
+		t.Fatalf("expected the cancelled retry wait to dead-letter the batch, got error: %v", storeError)
+	}
+	if len(deadLetteredEntries) != 1 {
+		t.Fatalf("dead letter entries = %d, want 1", len(deadLetteredEntries))
+	}
+}
+
 func TestBatchWriter_FlushesDestinationsConcurrently(t *testing.T) {
 	t.Parallel()
 	enteredDestinations := make(chan model.Destination, 3)

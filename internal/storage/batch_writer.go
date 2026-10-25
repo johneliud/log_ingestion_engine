@@ -172,7 +172,10 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 			if batchWriter.deadLetterSink == nil {
 				return storeError
 			}
-			batchWriter.deadLetterBatch(enrichedLogs, storeError)
+			deadLetterError := batchWriter.deadLetterBatch(enrichedLogs, storeError)
+			if deadLetterError != nil {
+				return deadLetterError
+			}
 			return nil
 		}
 
@@ -183,24 +186,36 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 		slog.Warn("retrying failed log batch write", "error", storeError, "destination", destination, "log_count", len(enrichedLogs), "retry_count", retryIndex+1, "retry_delay", retryDelay)
 
 		if waitError := batchWriter.waitForRetryDelay(batchWriter.applicationContext, retryDelay); waitError != nil {
+			if batchWriter.deadLetterSink != nil {
+				deadLetterError := batchWriter.deadLetterBatch(enrichedLogs, storeError)
+				if deadLetterError != nil {
+					return deadLetterError
+				}
+				return nil
+			}
 			return waitError
 		}
 	}
 }
 
-// Attempts to dead-letter every log in the batch, logging any submission failure with its details.
-func (batchWriter *BatchWriter) deadLetterBatch(enrichedLogs []model.EnrichedLog, storeError error) {
+// Attempts to dead-letter every log in the batch, returning any submission failure.
+func (batchWriter *BatchWriter) deadLetterBatch(enrichedLogs []model.EnrichedLog, storeError error) error {
 	failedAt := batchWriter.currentTimeProvider()
+	var deadLetterError error
 	for _, enrichedLog := range enrichedLogs {
 		deadLetterEntry := model.DeadLetterEntry{
 			Log:          enrichedLog,
 			ErrorMessage: storeError.Error(),
 			FailedAt:     failedAt,
 		}
-		if deadLetterError := batchWriter.deadLetterSink(deadLetterEntry); deadLetterError != nil {
-			slog.Error("writing dead letter entry failed", "error", deadLetterError, "batch_id", enrichedLog.BatchID, "destination", enrichedLog.Destination)
+		if submitError := batchWriter.deadLetterSink(deadLetterEntry); submitError != nil {
+			slog.Error("writing dead letter entry failed", "error", submitError, "batch_id", enrichedLog.BatchID, "destination", enrichedLog.Destination)
+			if deadLetterError == nil {
+				deadLetterError = submitError
+			}
 		}
 	}
+	return deadLetterError
 }
 
 // Waits for the retry delay unless the application context is cancelled first.

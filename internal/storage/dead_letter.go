@@ -119,14 +119,14 @@ func (deadLetterWriter *DeadLetterWriter) writeEntry(deadLetterFile **os.File, c
 		if closeError := (*deadLetterFile).Close(); closeError != nil {
 			slog.Error("closing dead letter file before rotation failed", "error", closeError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
 		}
-		
+
 		*deadLetterFile = nil
-		
+
 		if rotateError := rotateDeadLetterFile(deadLetterWriter.deadLetterFilePath); rotateError != nil {
 			slog.Error("rotating dead letter file failed", "error", rotateError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
 			return
 		}
-		
+
 		openedFile, fileSizeInBytes, openError := openOrCreateDeadLetterFile(deadLetterWriter.deadLetterFilePath)
 		if openError != nil {
 			slog.Error("opening dead letter file after rotation failed", "error", openError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
@@ -171,7 +171,7 @@ func rotateDeadLetterFile(deadLetterFilePath string) error {
 		if errors.Is(statError, os.ErrNotExist) {
 			return os.Rename(deadLetterFilePath, rotatedFilePath)
 		}
-		
+
 		if statError != nil {
 			return fmt.Errorf("checking rotated dead letter file %q: %w", rotatedFilePath, statError)
 		}
