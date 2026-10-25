@@ -55,6 +55,16 @@ const (
 	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
+
+	RoutingKeyLogWrite = "log.write"
+
+	ExchangeService1Name = "exchange_service1"
+	ExchangeService2Name = "exchange_service2"
+	ExchangeService3Name = "exchange_service3"
+
+	QueueService1Name = "queue_service1"
+	QueueService2Name = "queue_service2"
+	QueueService3Name = "queue_service3"
 )
 
 var defaultWriteRetryBackoffDelays = []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
