@@ -89,6 +89,10 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("DatabaseDirectoryPath = %q, want %q", applicationConfiguration.DatabaseDirectoryPath, defaultDatabaseDirectoryPath)
 	}
 
+	if applicationConfiguration.DatabaseBusyTimeout != defaultDatabaseBusyTimeout {
+		t.Errorf("DatabaseBusyTimeout = %s, want %s", applicationConfiguration.DatabaseBusyTimeout, defaultDatabaseBusyTimeout)
+	}
+
 	if applicationConfiguration.DeadLetterFilePath != defaultDeadLetterFilePath {
 		t.Errorf("DeadLetterFilePath = %q, want %q", applicationConfiguration.DeadLetterFilePath, defaultDeadLetterFilePath)
 	}
@@ -127,6 +131,7 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameWriteBatchSize] = "200"
 	environmentVariables[environmentNameWriteFlushInterval] = "2s"
 	environmentVariables[environmentNameDatabaseDirectoryPath] = "/var/log-engine"
+	environmentVariables[environmentNameDatabaseBusyTimeout] = "2500ms"
 	environmentVariables[environmentNameWriteRetryBackoffDelayList] = "500ms, 2s, 4s, 8s"
 	environmentVariables[environmentNameDeadLetterFilePath] = "failed/letters.jsonl"
 	environmentVariables[environmentNameDeadLetterMaximumFileSizeInBytes] = "20971520"
@@ -206,6 +211,10 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 
 	if applicationConfiguration.DatabaseDirectoryPath != "/var/log-engine" {
 		t.Errorf("DatabaseDirectoryPath = %q, want %q", applicationConfiguration.DatabaseDirectoryPath, "/var/log-engine")
+	}
+
+	if applicationConfiguration.DatabaseBusyTimeout != 2500*time.Millisecond {
+		t.Errorf("DatabaseBusyTimeout = %s, want 2.5s", applicationConfiguration.DatabaseBusyTimeout)
 	}
 
 	expectedRetryBackoffDelays := []time.Duration{500 * time.Millisecond, 2 * time.Second, 4 * time.Second, 8 * time.Second}
@@ -312,6 +321,13 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 				environmentVariables[environmentNameWriteBatchSize] = "0"
 			},
 			expectedErrorSubstrings: []string{"WRITE_BATCH_SIZE", "positive integer"},
+		},
+		{
+			name: "database busy timeout is not positive",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameDatabaseBusyTimeout] = "0s"
+			},
+			expectedErrorSubstrings: []string{"DB_BUSY_TIMEOUT", "positive duration"},
 		},
 		{
 			name: "retry backoff list contains a zero duration",

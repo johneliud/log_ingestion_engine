@@ -31,6 +31,7 @@ const (
 	environmentNameWriteBatchSize                   = "WRITE_BATCH_SIZE"
 	environmentNameWriteFlushInterval               = "WRITE_FLUSH_INTERVAL"
 	environmentNameDatabaseDirectoryPath            = "DB_DIR"
+	environmentNameDatabaseBusyTimeout              = "DB_BUSY_TIMEOUT"
 	environmentNameConfigurationFilePath            = "CONFIG_FILE_PATH"
 	environmentNameWriteRetryBackoffDelayList       = "RETRY_BACKOFFS"
 	environmentNameDeadLetterFilePath               = "DEAD_LETTER_PATH"
@@ -54,6 +55,7 @@ const (
 	defaultWriteBatchSize                   = 100
 	defaultWriteFlushInterval               = time.Second
 	defaultDatabaseDirectoryPath            = "./data"
+	defaultDatabaseBusyTimeout              = 5 * time.Second
 	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
@@ -67,6 +69,10 @@ const (
 	QueueService1Name = "queue_service1"
 	QueueService2Name = "queue_service2"
 	QueueService3Name = "queue_service3"
+
+	DatabaseFileService1Name = "logs_service1.db"
+	DatabaseFileService2Name = "logs_service2.db"
+	DatabaseFileService3Name = "logs_service3.db"
 )
 
 var defaultWriteRetryBackoffDelays = []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
@@ -96,6 +102,7 @@ type ApplicationConfiguration struct {
 	WriteBatchSize                   int
 	WriteFlushInterval               time.Duration
 	DatabaseDirectoryPath            string
+	DatabaseBusyTimeout              time.Duration
 	WriteRetryBackoffDelays          []time.Duration
 	DeadLetterFilePath               string
 	DeadLetterMaximumFileSizeInBytes int
@@ -249,6 +256,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, databaseDirectoryPathError
 	}
 	applicationConfiguration.DatabaseDirectoryPath = databaseDirectoryPath
+
+	databaseBusyTimeout, databaseBusyTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNameDatabaseBusyTimeout, defaultDatabaseBusyTimeout)
+	if databaseBusyTimeoutError != nil {
+		return ApplicationConfiguration{}, databaseBusyTimeoutError
+	}
+	applicationConfiguration.DatabaseBusyTimeout = databaseBusyTimeout
 
 	writeRetryBackoffDelays, writeRetryBackoffDelayListError := parsePositiveDurationListSetting(environmentVariables, environmentNameWriteRetryBackoffDelayList, defaultWriteRetryBackoffDelays)
 	if writeRetryBackoffDelayListError != nil {
