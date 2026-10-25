@@ -35,11 +35,9 @@ func NewQueueConsumer(applicationConfiguration config.ApplicationConfiguration, 
 func (queueConsumer *QueueConsumer) Start(applicationContext context.Context) <-chan struct{} {
 	completed := make(chan struct{})
 	var waitGroup sync.WaitGroup
-	waitGroup.Add(1)
-	go func() {
-		defer waitGroup.Done()
+	waitGroup.Go(func() {
 		queueConsumer.consume(applicationContext)
-	}()
+	})
 	go func() {
 		waitGroup.Wait()
 		close(completed)

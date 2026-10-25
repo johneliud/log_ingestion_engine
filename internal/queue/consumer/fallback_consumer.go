@@ -26,9 +26,7 @@ func NewFallbackProcessor(fallbackChannel <-chan model.EnrichedLog, storageHandl
 func (fallbackProcessor *FallbackProcessor) Start(applicationContext context.Context) <-chan struct{} {
 	completed := make(chan struct{})
 	var waitGroup sync.WaitGroup
-	waitGroup.Add(1)
-	go func() {
-		defer waitGroup.Done()
+	waitGroup.Go(func() {
 		for {
 			select {
 			case <-applicationContext.Done():
@@ -42,7 +40,7 @@ func (fallbackProcessor *FallbackProcessor) Start(applicationContext context.Con
 				}
 			}
 		}
-	}()
+	})
 	go func() {
 		waitGroup.Wait()
 		close(completed)
