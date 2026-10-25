@@ -42,3 +42,27 @@ type SQLiteLogStore struct {
 	databases map[model.Destination]*destinationDatabase
 }
 
+// Returns a store with one database opened per destination, creating any missing files and tables.
+func NewSQLiteLogStore(applicationConfiguration config.ApplicationConfiguration) (*SQLiteLogStore, error) {
+	if directoryCreationError := os.MkdirAll(applicationConfiguration.DatabaseDirectoryPath, 0o755); directoryCreationError != nil {
+		return nil, fmt.Errorf("creating database directory %q: %w", applicationConfiguration.DatabaseDirectoryPath, directoryCreationError)
+	}
+
+	databaseFileNames := map[model.Destination]string{
+		model.DestinationService1: config.DatabaseFileService1Name,
+		model.DestinationService2: config.DatabaseFileService2Name,
+		model.DestinationService3: config.DatabaseFileService3Name,
+	}
+
+	databases := make(map[model.Destination]*destinationDatabase, len(databaseFileNames))
+	for destination, databaseFileName := range databaseFileNames {
+		openedDatabase, openError := openDestinationDatabase(applicationConfiguration.DatabaseDirectoryPath, databaseFileName, applicationConfiguration.DatabaseBusyTimeout.Milliseconds())
+		if openError != nil {
+			closeDestinationDatabases(databases)
+			return nil, openError
+		}
+		databases[destination] = openedDatabase
+	}
+	return &SQLiteLogStore{databases: databases}, nil
+}
+
