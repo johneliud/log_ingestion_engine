@@ -66,3 +66,27 @@ func NewSQLiteLogStore(applicationConfiguration config.ApplicationConfiguration)
 	return &SQLiteLogStore{databases: databases}, nil
 }
 
+// Opens one destination database, enables WAL, creates the logs table and prepares the insert statement.
+func openDestinationDatabase(databaseDirectoryPath string, databaseFileName string, busyTimeoutInMilliseconds int64) (*destinationDatabase, error) {
+	databasePath := filepath.Join(databaseDirectoryPath, databaseFileName)
+	dataSourceName := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)", databasePath, busyTimeoutInMilliseconds)
+
+	database, openError := sql.Open("sqlite", dataSourceName)
+	if openError != nil {
+		return nil, fmt.Errorf("opening database %q: %w", databasePath, openError)
+	}
+	database.SetMaxOpenConns(1)
+
+	if _, tableCreationError := database.Exec(createLogsTableStatement); tableCreationError != nil {
+		database.Close()
+		return nil, fmt.Errorf("creating logs table in database %q: %w", databasePath, tableCreationError)
+	}
+
+	insertStatement, prepareError := database.Prepare(insertLogStatement)
+	if prepareError != nil {
+		database.Close()
+		return nil, fmt.Errorf("preparing insert statement for database %q: %w", databasePath, prepareError)
+	}
+	return &destinationDatabase{database: database, insertStatement: insertStatement}, nil
+}
+
