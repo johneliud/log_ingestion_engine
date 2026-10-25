@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,12 +55,12 @@ func (deadLetterWriter *DeadLetterWriter) Submit(deadLetterEntry model.DeadLette
 	}
 }
 
-// Runs the single writer goroutine until cancellation, then drains every queued entry.
-func (deadLetterWriter *DeadLetterWriter) Run(applicationContext context.Context) <-chan struct{} {
+// Runs the single writer goroutine until the entries channel is closed, then drains every queued entry.
+func (deadLetterWriter *DeadLetterWriter) Run() <-chan struct{} {
 	completed := make(chan struct{})
 	go func() {
 		defer close(completed)
-		deadLetterWriter.writeEntriesUntilCancelled(applicationContext)
+		deadLetterWriter.writeEntriesUntilClosed()
 		close(deadLetterWriter.stoppedChannel)
 		close(deadLetterWriter.writerDone)
 	}()
@@ -81,8 +80,8 @@ func (deadLetterWriter *DeadLetterWriter) Close() error {
 	return nil
 }
 
-// Writes queued entries until cancellation and then flushes whatever remains.
-func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilCancelled(applicationContext context.Context) {
+// Writes queued entries until the channel is closed, then drains whatever remains.
+func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilClosed() {
 	var deadLetterFile *os.File
 	currentFileSizeInBytes := int64(0)
 	defer func() {
@@ -95,12 +94,10 @@ func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilCancelled(application
 		select {
 		case deadLetterEntry, ok := <-deadLetterWriter.entriesChannel:
 			if !ok {
+				deadLetterWriter.drainEntries(&deadLetterFile, &currentFileSizeInBytes)
 				return
 			}
 			deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, deadLetterEntry)
-		case <-applicationContext.Done():
-			deadLetterWriter.drainEntries(&deadLetterFile, &currentFileSizeInBytes)
-			return
 		}
 	}
 }

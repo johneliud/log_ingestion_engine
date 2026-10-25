@@ -72,7 +72,7 @@ func waitForDeadLetterWriter(t *testing.T, completed <-chan struct{}) {
 	select {
 	case <-completed:
 	case <-time.After(2 * time.Second):
-		t.Fatal("dead letter writer did not stop after context cancellation")
+		t.Fatal("dead letter writer did not stop after Close")
 	}
 }
 
@@ -83,14 +83,15 @@ func TestDeadLetterWriter_WritesEntriesAsNewlineDelimitedJSON(t *testing.T) {
 		DeadLetterFilePath:               deadLetterFilePath,
 		DeadLetterMaximumFileSizeInBytes: 1024 * 1024,
 	})
-	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
-	completed := deadLetterWriter.Run(applicationContext)
+	completed := deadLetterWriter.Run()
 
 	submittedEntry := aDeadLetterEntry("one")
 	if submitError := deadLetterWriter.Submit(submittedEntry); submitError != nil {
 		t.Fatalf("Submit returned error: %v", submitError)
 	}
-	applicationContextCancellation()
+	if closeError := deadLetterWriter.Close(); closeError != nil {
+		t.Fatalf("Close returned error: %v", closeError)
+	}
 	waitForDeadLetterWriter(t, completed)
 
 	deadLetterEntries := readDeadLetterEntries(t, deadLetterFilePath)
@@ -119,9 +120,7 @@ func TestDeadLetterWriter_CloseWaitsForQueuedEntries(t *testing.T) {
 		DeadLetterFilePath:               deadLetterFilePath,
 		DeadLetterMaximumFileSizeInBytes: 1024 * 1024,
 	})
-	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
-	defer applicationContextCancellation()
-	completed := deadLetterWriter.Run(applicationContext)
+	completed := deadLetterWriter.Run()
 
 	submittedEntry := aDeadLetterEntry("one")
 	if submitError := deadLetterWriter.Submit(submittedEntry); submitError != nil {
@@ -146,8 +145,7 @@ func TestDeadLetterWriter_RotatesAfterMaximumFileSize(t *testing.T) {
 		DeadLetterFilePath:               deadLetterFilePath,
 		DeadLetterMaximumFileSizeInBytes: maximumFileSizeInBytes,
 	})
-	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
-	completed := deadLetterWriter.Run(applicationContext)
+	completed := deadLetterWriter.Run()
 
 	submittedEntryCount := 5
 	for entryIndex := 0; entryIndex < submittedEntryCount; entryIndex++ {
@@ -155,7 +153,9 @@ func TestDeadLetterWriter_RotatesAfterMaximumFileSize(t *testing.T) {
 			t.Fatalf("Submit returned error: %v", submitError)
 		}
 	}
-	applicationContextCancellation()
+	if closeError := deadLetterWriter.Close(); closeError != nil {
+		t.Fatalf("Close returned error: %v", closeError)
+	}
 	waitForDeadLetterWriter(t, completed)
 
 	rotatedFilePaths, globError := filepath.Glob(rotatedDeadLetterFilePattern(deadLetterFilePath))
