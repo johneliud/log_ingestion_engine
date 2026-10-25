@@ -134,26 +134,31 @@ func (batchWriter *BatchWriter) FlushAll() {
 // Writes the pending logs for one destination, waiting for any in-flight flush to finish first.
 func (batchWriter *BatchWriter) flushDestination(destination model.Destination) error {
 	destinationBuffer := batchWriter.buffers[destination]
-	destinationBuffer.mutex.Lock()
-	if destinationBuffer.isFlushing || len(destinationBuffer.pendingLogs) == 0 {
+	for {
+		destinationBuffer.mutex.Lock()
+		if destinationBuffer.isFlushing || len(destinationBuffer.pendingLogs) == 0 {
+			destinationBuffer.mutex.Unlock()
+			return nil
+		}
+
+		destinationBuffer.isFlushing = true
+		logsToFlush := destinationBuffer.pendingLogs
+		destinationBuffer.pendingLogs = nil
 		destinationBuffer.mutex.Unlock()
-		return nil
+
+		storeError := batchWriter.storeWithRetries(destination, logsToFlush)
+
+		destinationBuffer.mutex.Lock()
+		destinationBuffer.isFlushing = false
+		if storeError != nil {
+			destinationBuffer.pendingLogs = append(logsToFlush, destinationBuffer.pendingLogs...)
+		}
+		destinationBuffer.mutex.Unlock()
+
+		if storeError != nil {
+			return storeError
+		}
 	}
-
-	destinationBuffer.isFlushing = true
-	logsToFlush := destinationBuffer.pendingLogs
-	destinationBuffer.pendingLogs = nil
-	destinationBuffer.mutex.Unlock()
-
-	storeError := batchWriter.storeWithRetries(destination, logsToFlush)
-
-	destinationBuffer.mutex.Lock()
-	destinationBuffer.isFlushing = false
-	if storeError != nil {
-		destinationBuffer.pendingLogs = append(logsToFlush, destinationBuffer.pendingLogs...)
-	}
-	destinationBuffer.mutex.Unlock()
-	return storeError
 }
 
 // Attempts the batch store, retrying with the configured backoff while updating each log's retry count.
