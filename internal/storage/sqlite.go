@@ -90,3 +90,41 @@ func openDestinationDatabase(databaseDirectoryPath string, databaseFileName stri
 	return &destinationDatabase{database: database, insertStatement: insertStatement}, nil
 }
 
+// Writes every log for one destination inside a single transaction.
+func (sqliteLogStore *SQLiteLogStore) StoreBatch(destination model.Destination, enrichedLogs []model.EnrichedLog) error {
+	destinationDatabase, destinationExists := sqliteLogStore.databases[destination]
+	if !destinationExists {
+		return fmt.Errorf("no database configured for destination %q", destination)
+	}
+
+	destinationDatabase.mutex.Lock()
+	defer destinationDatabase.mutex.Unlock()
+
+	transaction, transactionError := destinationDatabase.database.Begin()
+	if transactionError != nil {
+		return fmt.Errorf("beginning transaction for destination %q: %w", destination, transactionError)
+	}
+
+	transactionInsertStatement := transaction.Stmt(destinationDatabase.insertStatement)
+	for _, enrichedLog := range enrichedLogs {
+		_, insertError := transactionInsertStatement.Exec(
+			enrichedLog.Timestamp,
+			enrichedLog.Service,
+			string(enrichedLog.Level),
+			enrichedLog.Message,
+			enrichedLog.ReceivedAt.UTC().Format(receivedAtLayout),
+			enrichedLog.SourceIP,
+			enrichedLog.Environment,
+		)
+		if insertError != nil {
+			transaction.Rollback()
+			return fmt.Errorf("inserting log into destination %q database: %w", destination, insertError)
+		}
+	}
+
+	if commitError := transaction.Commit(); commitError != nil {
+		return fmt.Errorf("committing transaction for destination %q: %w", destination, commitError)
+	}
+	return nil
+}
+
