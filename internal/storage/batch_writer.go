@@ -42,3 +42,22 @@ func (batchWriter *BatchWriter) StoreBatch(destination model.Destination, enrich
 
 	return batchWriter.flush(destination, logsToFlush)
 }
+
+// Flushes every destination buffer when the trigger fires or the context is cancelled.
+func (batchWriter *BatchWriter) Run(applicationContext context.Context, flushTrigger <-chan struct{}) <-chan struct{} {
+	completed := make(chan struct{})
+	go func() {
+		defer close(completed)
+		for {
+			select {
+			case <-applicationContext.Done():
+				batchWriter.FlushAll()
+				return
+			case <-flushTrigger:
+				batchWriter.FlushAll()
+			}
+		}
+	}()
+	return completed
+}
+
