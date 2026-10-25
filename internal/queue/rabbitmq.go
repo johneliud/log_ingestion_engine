@@ -33,6 +33,7 @@ type Publisher struct {
 	fallbackChannel          chan enrichedLogMessage
 	fallbackCapacity         int
 	isConnected              bool
+	returns                  chan amqp.Return
 }
 
 // Returns a new publisher.
@@ -45,6 +46,7 @@ func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fall
 		fallbackChannel:          make(chan enrichedLogMessage, fallbackCapacity),
 		fallbackCapacity:         fallbackCapacity,
 		isConnected:              false,
+		returns:                  make(chan amqp.Return, 1),
 	}
 }
 
@@ -96,6 +98,7 @@ func (publisher *Publisher) Connect() error {
 	publisher.connection = connection
 	publisher.channel = channel
 	publisher.isConnected = true
+	channel.NotifyReturn(publisher.returns)
 	return nil
 }
 
@@ -156,7 +159,7 @@ func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
 			publishContext,
 			exchangeNameForDestination(enrichedLog.Destination),
 			config.RoutingKeyLogWrite,
-			false,
+			true,
 			false,
 			amqp.Publishing{
 				DeliveryMode: amqp.Persistent,
@@ -177,8 +180,14 @@ func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
 		if deferredConfirmation != nil {
 			publishConfirmed, publishConfirmationError = deferredConfirmation.WaitContext(publishContext)
 		}
-		if publishConfirmationError != nil || !publishConfirmed {
-			slog.Error("publishing to rabbitmq was not confirmed by the broker, using fallback", "error", publishConfirmationError, "destination", enrichedLog.Destination, "confirmed", publishConfirmed)
+		unroutable := false
+		select {
+		case <-publisher.returns:
+			unroutable = true
+		default:
+		}
+		if publishConfirmationError != nil || !publishConfirmed || unroutable {
+			slog.Error("publishing to rabbitmq was not confirmed by the broker, using fallback", "error", publishConfirmationError, "destination", enrichedLog.Destination, "confirmed", publishConfirmed, "unroutable", unroutable)
 			publisher.mutex.Lock()
 			publisher.isConnected = false
 			publisher.mutex.Unlock()
@@ -191,6 +200,28 @@ func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
 	}
 
 	return publisher.publishToFallback(enrichedLog)
+}
+
+// Reconnects to RabbitMQ and drains buffered fallback logs.
+func (publisher *Publisher) Reconnect() error {
+	reconnectError := publisher.Connect()
+	if reconnectError != nil {
+		return reconnectError
+	}
+	return publisher.drainFallback()
+}
+
+// Drains buffered fallback logs into RabbitMQ.
+func (publisher *Publisher) drainFallback() error {
+	for {
+		enrichedLog, hasBufferedLog := publisher.GetFallbackMessage()
+		if !hasBufferedLog {
+			return nil
+		}
+		if publishError := publisher.Publish(enrichedLog); publishError != nil {
+			return publishError
+		}
+	}
 }
 
 func (publisher *Publisher) publishToFallback(enrichedLog model.EnrichedLog) error {
