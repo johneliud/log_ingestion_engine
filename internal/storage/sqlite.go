@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -69,7 +70,10 @@ func NewSQLiteLogStore(applicationConfiguration config.ApplicationConfiguration)
 // Opens one destination database, enables WAL, creates the logs table and prepares the insert statement.
 func openDestinationDatabase(databaseDirectoryPath string, databaseFileName string, busyTimeoutInMilliseconds int64) (*destinationDatabase, error) {
 	databasePath := filepath.Join(databaseDirectoryPath, databaseFileName)
-	dataSourceName := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)", databasePath, busyTimeoutInMilliseconds)
+	dataSourceQuery := url.Values{}
+	dataSourceQuery.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeoutInMilliseconds))
+	dataSourceQuery.Add("_pragma", "journal_mode(WAL)")
+	dataSourceName := (&url.URL{Scheme: "file", Opaque: databasePath, RawQuery: dataSourceQuery.Encode()}).String()
 
 	database, openError := sql.Open("sqlite", dataSourceName)
 	if openError != nil {

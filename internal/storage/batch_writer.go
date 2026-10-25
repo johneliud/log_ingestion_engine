@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -47,12 +48,12 @@ func NewBatchWriter(dependencies BatchWriterDependencies) *BatchWriter {
 	if applicationContext == nil {
 		applicationContext = context.Background()
 	}
-	
+
 	waitForRetryDelay := dependencies.WaitForRetryDelay
 	if waitForRetryDelay == nil {
 		waitForRetryDelay = waitForRetryDuration
 	}
-	
+
 	buffers := make(map[model.Destination]*destinationBuffer, 3)
 	for _, destination := range []model.Destination{model.DestinationService1, model.DestinationService2, model.DestinationService3} {
 		buffers[destination] = &destinationBuffer{}
@@ -69,7 +70,11 @@ func NewBatchWriter(dependencies BatchWriterDependencies) *BatchWriter {
 
 // Appends logs to their destination buffer and flushes once the size trigger is met.
 func (batchWriter *BatchWriter) StoreBatch(destination model.Destination, enrichedLogs []model.EnrichedLog) error {
-	destinationBuffer := batchWriter.buffers[destination]
+	destinationBuffer, destinationExists := batchWriter.buffers[destination]
+	if !destinationExists {
+		return fmt.Errorf("no buffer configured for destination %q", destination)
+	}
+	
 	destinationBuffer.mutex.Lock()
 	destinationBuffer.pendingLogs = append(destinationBuffer.pendingLogs, enrichedLogs...)
 	shouldFlush := len(destinationBuffer.pendingLogs) >= batchWriter.writeBatchSize && !destinationBuffer.isFlushing
@@ -120,7 +125,7 @@ func (batchWriter *BatchWriter) flushDestination(destination model.Destination) 
 		destinationBuffer.mutex.Unlock()
 		return nil
 	}
-	
+
 	destinationBuffer.isFlushing = true
 	logsToFlush := destinationBuffer.pendingLogs
 	destinationBuffer.pendingLogs = nil
