@@ -52,3 +52,47 @@ func (deadLetterWriter *DeadLetterWriter) Submit(deadLetterEntry model.DeadLette
 	}
 }
 
+// Runs the single writer goroutine until cancellation, then drains every queued entry.
+func (deadLetterWriter *DeadLetterWriter) Run(applicationContext context.Context) <-chan struct{} {
+	completed := make(chan struct{})
+	go func() {
+		defer close(completed)
+		deadLetterWriter.writeEntriesUntilCancelled(applicationContext)
+		close(deadLetterWriter.stoppedChannel)
+	}()
+	return completed
+}
+
+// Writes queued entries until cancellation and then flushes whatever remains.
+func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilCancelled(applicationContext context.Context) {
+	var deadLetterFile *os.File
+	currentFileSizeInBytes := int64(0)
+	defer func() {
+		if deadLetterFile != nil {
+			deadLetterFile.Close()
+		}
+	}()
+
+	for {
+		select {
+		case <-applicationContext.Done():
+			deadLetterWriter.drainEntries(&deadLetterFile, &currentFileSizeInBytes)
+			return
+		case deadLetterEntry := <-deadLetterWriter.entriesChannel:
+			deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, deadLetterEntry)
+		}
+	}
+}
+
+// Writes every entry still queued after cancellation before the writer exits.
+func (deadLetterWriter *DeadLetterWriter) drainEntries(deadLetterFile **os.File, currentFileSizeInBytes *int64) {
+	for {
+		select {
+		case deadLetterEntry := <-deadLetterWriter.entriesChannel:
+			deadLetterWriter.writeEntry(deadLetterFile, currentFileSizeInBytes, deadLetterEntry)
+		default:
+			return
+		}
+	}
+}
+
