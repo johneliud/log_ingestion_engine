@@ -8,3 +8,5 @@ require (
 )
 
 require golang.org/x/time v0.16.0
+
+require github.com/rabbitmq/amqp091-go v1.10.0
