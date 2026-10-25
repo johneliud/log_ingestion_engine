@@ -16,13 +16,18 @@ type batchStore func(destination model.Destination, enrichedLogs []model.Enriche
 // Waits for a retry delay or reports that the application is shutting down.
 type retryWaiter func(applicationContext context.Context, retryDelay time.Duration) error
 
+// Records a log that exhausted every storage retry.
+type deadLetterSink func(deadLetterEntry model.DeadLetterEntry) error
+
 // Supplies the buffering, retry settings and storage side effect for a batch writer.
 type BatchWriterDependencies struct {
-	ApplicationContext context.Context
-	WriteBatchSize     int
-	RetryBackoffDelays []time.Duration
-	StoreBatch         batchStore
-	WaitForRetryDelay  retryWaiter
+	ApplicationContext  context.Context
+	WriteBatchSize      int
+	RetryBackoffDelays  []time.Duration
+	StoreBatch          batchStore
+	WaitForRetryDelay   retryWaiter
+	DeadLetterSink      deadLetterSink
+	CurrentTimeProvider func() time.Time
 }
 
 // Represents the buffered logs and in-flight flush state for one destination.
@@ -34,12 +39,14 @@ type destinationBuffer struct {
 
 // Buffers logs per destination and flushes them at a size or interval trigger with retries.
 type BatchWriter struct {
-	applicationContext context.Context
-	writeBatchSize     int
-	retryBackoffDelays []time.Duration
-	storeBatch         batchStore
-	waitForRetryDelay  retryWaiter
-	buffers            map[model.Destination]*destinationBuffer
+	applicationContext  context.Context
+	writeBatchSize      int
+	retryBackoffDelays  []time.Duration
+	storeBatch          batchStore
+	waitForRetryDelay   retryWaiter
+	deadLetterSink      deadLetterSink
+	currentTimeProvider func() time.Time
+	buffers             map[model.Destination]*destinationBuffer
 }
 
 // Returns a batch writer that flushes a destination once it reaches the configured size.
@@ -54,17 +61,24 @@ func NewBatchWriter(dependencies BatchWriterDependencies) *BatchWriter {
 		waitForRetryDelay = waitForRetryDuration
 	}
 
+	currentTimeProvider := dependencies.CurrentTimeProvider
+	if currentTimeProvider == nil {
+		currentTimeProvider = time.Now
+	}
+
 	buffers := make(map[model.Destination]*destinationBuffer, 3)
 	for _, destination := range []model.Destination{model.DestinationService1, model.DestinationService2, model.DestinationService3} {
 		buffers[destination] = &destinationBuffer{}
 	}
 	return &BatchWriter{
-		applicationContext: applicationContext,
-		writeBatchSize:     dependencies.WriteBatchSize,
-		retryBackoffDelays: dependencies.RetryBackoffDelays,
-		storeBatch:         dependencies.StoreBatch,
-		waitForRetryDelay:  waitForRetryDelay,
-		buffers:            buffers,
+		applicationContext:  applicationContext,
+		writeBatchSize:      dependencies.WriteBatchSize,
+		retryBackoffDelays:  dependencies.RetryBackoffDelays,
+		storeBatch:          dependencies.StoreBatch,
+		waitForRetryDelay:   waitForRetryDelay,
+		deadLetterSink:      dependencies.DeadLetterSink,
+		currentTimeProvider: currentTimeProvider,
+		buffers:             buffers,
 	}
 }
 
@@ -74,7 +88,7 @@ func (batchWriter *BatchWriter) StoreBatch(destination model.Destination, enrich
 	if !destinationExists {
 		return fmt.Errorf("no buffer configured for destination %q", destination)
 	}
-	
+
 	destinationBuffer.mutex.Lock()
 	destinationBuffer.pendingLogs = append(destinationBuffer.pendingLogs, enrichedLogs...)
 	shouldFlush := len(destinationBuffer.pendingLogs) >= batchWriter.writeBatchSize && !destinationBuffer.isFlushing
@@ -155,7 +169,11 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 				enrichedLogs[logIndex].RetryCount = retryIndex
 			}
 			slog.Error("storing log batch failed after retries", "error", storeError, "destination", destination, "log_count", len(enrichedLogs), "retry_count", retryIndex)
-			return storeError
+			if batchWriter.deadLetterSink == nil {
+				return storeError
+			}
+			batchWriter.deadLetterBatch(enrichedLogs, storeError)
+			return nil
 		}
 
 		retryDelay := batchWriter.retryBackoffDelays[retryIndex]
@@ -166,6 +184,21 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 
 		if waitError := batchWriter.waitForRetryDelay(batchWriter.applicationContext, retryDelay); waitError != nil {
 			return waitError
+		}
+	}
+}
+
+// Attempts to dead-letter every log in the batch, logging any submission failure with its details.
+func (batchWriter *BatchWriter) deadLetterBatch(enrichedLogs []model.EnrichedLog, storeError error) {
+	failedAt := batchWriter.currentTimeProvider()
+	for _, enrichedLog := range enrichedLogs {
+		deadLetterEntry := model.DeadLetterEntry{
+			Log:          enrichedLog,
+			ErrorMessage: storeError.Error(),
+			FailedAt:     failedAt,
+		}
+		if deadLetterError := batchWriter.deadLetterSink(deadLetterEntry); deadLetterError != nil {
+			slog.Error("writing dead letter entry failed", "error", deadLetterError, "batch_id", enrichedLog.BatchID, "destination", enrichedLog.Destination)
 		}
 	}
 }
