@@ -87,6 +87,27 @@ func (publisher *Publisher) Connect() error {
 	return nil
 }
 
+func (publisher *Publisher) declareTopology(channel *amqp.Channel) error {
+	exchanges := []string{config.ExchangeService1Name, config.ExchangeService2Name, config.ExchangeService3Name}
+	queues := []string{config.QueueService1Name, config.QueueService2Name, config.QueueService3Name}
+
+	for _, exchangeName := range exchanges {
+		if err := channel.ExchangeDeclare(exchangeName, "direct", true, false, false, false, nil); err != nil {
+			return err
+		}
+	}
+
+	for index, queueName := range queues {
+		if _, err := channel.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
+			return err
+		}
+		if err := channel.QueueBind(queueName, config.RoutingKeyLogWrite, exchanges[index], false, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (publisher *Publisher) publishToFallback(enrichedLog model.EnrichedLog) error {
 	select {
 	case publisher.fallbackChannel <- enrichedLogMessage{EnrichedLog: enrichedLog}:
