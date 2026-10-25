@@ -51,6 +51,12 @@ go run ./cmd/replay logs-failed.1.json # replays a rotated file
 
 Replay stops at the first unreadable line so a corrupt file is never silently skipped. The command does not delete or truncate the replayed file; remove it after verifying the rows.
 
+## RabbitMQ outages and reconnects
+
+When a publish fails or the broker connection drops, the publisher logs a warning, marks itself disconnected and writes subsequent logs to a bounded in-memory fallback instead of blocking ingestion. The publisher retries the connection automatically using `RABBITMQ_RECONNECT_BACKOFFS` (default `1s,5s,10s,30s`, reusing the last delay after the list is exhausted) and resumes publishing once the broker returns.
+
+Fallback logs are not re-published after reconnecting. They stay in the fallback channel and the fallback consumer stores them directly in SQLite while new logs go to RabbitMQ, so each accepted log follows exactly one path: broker or fallback. If the fallback fills before the broker returns, `Publish` reports and logs an error rather than dropping the log silently; during a sustained outage with more than the fallback capacity in flight, that is the only documented loss point.
+
 ## Tests
 
 ```bash
