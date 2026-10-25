@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/johneliud/log_ingestion_engine/internal/config"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
@@ -24,6 +25,9 @@ type DeadLetterWriter struct {
 	maximumFileSizeInBytes int64
 	entriesChannel         chan model.DeadLetterEntry
 	stoppedChannel         chan struct{}
+	mutex                  sync.Mutex
+	closed                 bool
+	writerDone             chan struct{}
 }
 
 // Returns a writer that accepts dead letter entries for serialized file writes.
@@ -33,17 +37,17 @@ func NewDeadLetterWriter(applicationConfiguration config.ApplicationConfiguratio
 		maximumFileSizeInBytes: int64(applicationConfiguration.DeadLetterMaximumFileSizeInBytes),
 		entriesChannel:         make(chan model.DeadLetterEntry, defaultDeadLetterBufferSize),
 		stoppedChannel:         make(chan struct{}),
+		writerDone:             make(chan struct{}),
 	}
 }
 
 // Enqueues a dead letter entry, waiting for room unless the writer has stopped.
 func (deadLetterWriter *DeadLetterWriter) Submit(deadLetterEntry model.DeadLetterEntry) error {
-	select {
-	case <-deadLetterWriter.stoppedChannel:
+	deadLetterWriter.mutex.Lock()
+	defer deadLetterWriter.mutex.Unlock()
+	if deadLetterWriter.closed {
 		return errDeadLetterWriterStopped
-	default:
 	}
-
 	select {
 	case deadLetterWriter.entriesChannel <- deadLetterEntry:
 		return nil
@@ -59,8 +63,22 @@ func (deadLetterWriter *DeadLetterWriter) Run(applicationContext context.Context
 		defer close(completed)
 		deadLetterWriter.writeEntriesUntilCancelled(applicationContext)
 		close(deadLetterWriter.stoppedChannel)
+		close(deadLetterWriter.writerDone)
 	}()
 	return completed
+}
+
+// Closes the dead letter writer after the batch writer has completed.
+func (deadLetterWriter *DeadLetterWriter) Close() error {
+	deadLetterWriter.mutex.Lock()
+	defer deadLetterWriter.mutex.Unlock()
+	if deadLetterWriter.closed {
+		return nil
+	}
+	deadLetterWriter.closed = true
+	close(deadLetterWriter.entriesChannel)
+	<-deadLetterWriter.writerDone
+	return nil
 }
 
 // Writes queued entries until cancellation and then flushes whatever remains.
@@ -75,11 +93,14 @@ func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilCancelled(application
 
 	for {
 		select {
+		case deadLetterEntry, ok := <-deadLetterWriter.entriesChannel:
+			if !ok {
+				return
+			}
+			deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, deadLetterEntry)
 		case <-applicationContext.Done():
 			deadLetterWriter.drainEntries(&deadLetterFile, &currentFileSizeInBytes)
 			return
-		case deadLetterEntry := <-deadLetterWriter.entriesChannel:
-			deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, deadLetterEntry)
 		}
 	}
 }
@@ -88,7 +109,10 @@ func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilCancelled(application
 func (deadLetterWriter *DeadLetterWriter) drainEntries(deadLetterFile **os.File, currentFileSizeInBytes *int64) {
 	for {
 		select {
-		case deadLetterEntry := <-deadLetterWriter.entriesChannel:
+		case deadLetterEntry, ok := <-deadLetterWriter.entriesChannel:
+			if !ok {
+				return
+			}
 			deadLetterWriter.writeEntry(deadLetterFile, currentFileSizeInBytes, deadLetterEntry)
 		default:
 			return

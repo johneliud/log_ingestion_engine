@@ -112,6 +112,32 @@ func TestDeadLetterWriter_WritesEntriesAsNewlineDelimitedJSON(t *testing.T) {
 	}
 }
 
+func TestDeadLetterWriter_CloseWaitsForQueuedEntries(t *testing.T) {
+	t.Parallel()
+	deadLetterFilePath := filepath.Join(t.TempDir(), "logs-failed.json")
+	deadLetterWriter := NewDeadLetterWriter(config.ApplicationConfiguration{
+		DeadLetterFilePath:               deadLetterFilePath,
+		DeadLetterMaximumFileSizeInBytes: 1024 * 1024,
+	})
+	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
+	defer applicationContextCancellation()
+	completed := deadLetterWriter.Run(applicationContext)
+
+	submittedEntry := aDeadLetterEntry("one")
+	if submitError := deadLetterWriter.Submit(submittedEntry); submitError != nil {
+		t.Fatalf("Submit returned error: %v", submitError)
+	}
+	if closeError := deadLetterWriter.Close(); closeError != nil {
+		t.Fatalf("Close returned error: %v", closeError)
+	}
+	waitForDeadLetterWriter(t, completed)
+
+	deadLetterEntries := readDeadLetterEntries(t, deadLetterFilePath)
+	if len(deadLetterEntries) != 1 {
+		t.Fatalf("dead letter entry count = %d, want 1", len(deadLetterEntries))
+	}
+}
+
 func TestDeadLetterWriter_RotatesAfterMaximumFileSize(t *testing.T) {
 	t.Parallel()
 	deadLetterFilePath := filepath.Join(t.TempDir(), "logs-failed.json")
