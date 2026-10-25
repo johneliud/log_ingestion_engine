@@ -61,3 +61,31 @@ func (batchWriter *BatchWriter) Run(applicationContext context.Context, flushTri
 	return completed
 }
 
+// Flushes the buffered logs for every destination.
+func (batchWriter *BatchWriter) FlushAll() {
+	batchWriter.mutex.Lock()
+	logsByDestination := batchWriter.pendingLogsByDestination
+	batchWriter.pendingLogsByDestination = make(map[model.Destination][]model.EnrichedLog)
+	batchWriter.mutex.Unlock()
+
+	for destination, enrichedLogs := range logsByDestination {
+		if len(enrichedLogs) == 0 {
+			continue
+		}
+		batchWriter.flush(destination, enrichedLogs)
+	}
+}
+
+func (batchWriter *BatchWriter) flush(destination model.Destination, enrichedLogs []model.EnrichedLog) error {
+	storeError := batchWriter.storeBatch(destination, enrichedLogs)
+	if storeError == nil {
+		return nil
+	}
+
+	slog.Error("storing log batch failed", "error", storeError, "destination", destination, "log_count", len(enrichedLogs))
+
+	batchWriter.mutex.Lock()
+	batchWriter.pendingLogsByDestination[destination] = append(enrichedLogs, batchWriter.pendingLogsByDestination[destination]...)
+	batchWriter.mutex.Unlock()
+	return storeError
+}
