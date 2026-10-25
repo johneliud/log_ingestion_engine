@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
+	"strconv"
 	"sync"
 
 	"github.com/johneliud/log_ingestion_engine/internal/config"
@@ -51,12 +53,15 @@ func (publisher *Publisher) Connect() error {
 	publisher.mutex.Lock()
 	defer publisher.mutex.Unlock()
 
-	connectionString := fmt.Sprintf("amqp://%s:%s@%s:%d/",
-		publisher.applicationConfiguration.RabbitMQUsername,
-		publisher.applicationConfiguration.RabbitMQPassword,
-		publisher.applicationConfiguration.RabbitMQHost,
-		publisher.applicationConfiguration.RabbitMQPort,
-	)
+	previousChannel := publisher.channel
+	previousConnection := publisher.connection
+
+	connectionURL := url.URL{
+		Scheme: brokerSchemeForHost(publisher.applicationConfiguration.RabbitMQHost),
+		User:   url.UserPassword(publisher.applicationConfiguration.RabbitMQUsername, publisher.applicationConfiguration.RabbitMQPassword),
+		Host:   net.JoinHostPort(publisher.applicationConfiguration.RabbitMQHost, strconv.Itoa(publisher.applicationConfiguration.RabbitMQPort)),
+	}
+	connectionString := connectionURL.String()
 
 	connection, connectionError := amqp.Dial(connectionString)
 	if connectionError != nil {
@@ -81,10 +86,25 @@ func (publisher *Publisher) Connect() error {
 		return err
 	}
 
+	if previousChannel != nil {
+		previousChannel.Close()
+	}
+	if previousConnection != nil {
+		previousConnection.Close()
+	}
+
 	publisher.connection = connection
 	publisher.channel = channel
 	publisher.isConnected = true
 	return nil
+}
+
+// Returns the AMQP scheme for the broker host, using TLS for remote deployments.
+func brokerSchemeForHost(host string) string {
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return "amqp"
+	}
+	return "amqps"
 }
 
 func (publisher *Publisher) declareTopology(channel *amqp.Channel) error {
@@ -124,7 +144,15 @@ func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
 			return marshalError
 		}
 
-		publishError := channel.PublishWithContext(
+		if confirmError := channel.Confirm(false); confirmError != nil {
+			slog.Error("confirming rabbitmq publishing failed, using fallback", "error", confirmError, "destination", enrichedLog.Destination)
+			publisher.mutex.Lock()
+			publisher.isConnected = false
+			publisher.mutex.Unlock()
+			return publisher.publishToFallback(enrichedLog)
+		}
+
+		deferredConfirmation, publishError := channel.PublishWithDeferredConfirmWithContext(
 			publishContext,
 			exchangeNameForDestination(enrichedLog.Destination),
 			config.RoutingKeyLogWrite,
@@ -136,13 +164,28 @@ func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
 				Body:         body,
 			},
 		)
-		if publishError == nil {
-			return nil
+		if publishError != nil {
+			slog.Error("publishing to rabbitmq failed, using fallback", "error", publishError, "destination", enrichedLog.Destination)
+			publisher.mutex.Lock()
+			publisher.isConnected = false
+			publisher.mutex.Unlock()
+			return publisher.publishToFallback(enrichedLog)
 		}
-		slog.Error("publishing to rabbitmq failed, using fallback", "error", publishError, "destination", enrichedLog.Destination)
-		publisher.mutex.Lock()
-		publisher.isConnected = false
-		publisher.mutex.Unlock()
+
+		publishConfirmed := false
+		publishConfirmationError := error(nil)
+		if deferredConfirmation != nil {
+			publishConfirmed, publishConfirmationError = deferredConfirmation.WaitContext(publishContext)
+		}
+		if publishConfirmationError != nil || !publishConfirmed {
+			slog.Error("publishing to rabbitmq was not confirmed by the broker, using fallback", "error", publishConfirmationError, "destination", enrichedLog.Destination, "confirmed", publishConfirmed)
+			publisher.mutex.Lock()
+			publisher.isConnected = false
+			publisher.mutex.Unlock()
+			return publisher.publishToFallback(enrichedLog)
+		}
+
+		return nil
 	} else {
 		slog.Warn("rabbitmq not connected, using in-memory fallback", "destination", enrichedLog.Destination)
 	}
