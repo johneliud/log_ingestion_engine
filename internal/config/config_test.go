@@ -73,6 +73,18 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("PublishTimeout = %s, want %s", applicationConfiguration.PublishTimeout, defaultPublishTimeout)
 	}
 
+	expectedRabbitMQReconnectBackoffDelays := []time.Duration{time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+
+	if len(applicationConfiguration.RabbitMQReconnectBackoffDelays) != len(expectedRabbitMQReconnectBackoffDelays) {
+		t.Fatalf("RabbitMQReconnectBackoffDelays has %d entries, want %d", len(applicationConfiguration.RabbitMQReconnectBackoffDelays), len(expectedRabbitMQReconnectBackoffDelays))
+	}
+
+	for reconnectBackoffDelayIndex, expectedReconnectBackoffDelay := range expectedRabbitMQReconnectBackoffDelays {
+		if applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex] != expectedReconnectBackoffDelay {
+			t.Errorf("RabbitMQReconnectBackoffDelays[%d] = %s, want %s", reconnectBackoffDelayIndex, applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex], expectedReconnectBackoffDelay)
+		}
+	}
+
 	if applicationConfiguration.PipelineWorkerCount != defaultPipelineWorkerCount {
 		t.Errorf("PipelineWorkerCount = %d, want %d", applicationConfiguration.PipelineWorkerCount, defaultPipelineWorkerCount)
 	}
@@ -127,6 +139,7 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameRabbitMQPort] = "5673"
 	environmentVariables[environmentNameRabbitMQManagementURL] = "https://broker.internal:15672"
 	environmentVariables[environmentNamePublishTimeout] = "3s"
+	environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "250ms, 2s, 15s"
 	environmentVariables[environmentNamePipelineWorkerCount] = "8"
 	environmentVariables[environmentNameWriteBatchSize] = "200"
 	environmentVariables[environmentNameWriteFlushInterval] = "2s"
@@ -195,6 +208,18 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 
 	if applicationConfiguration.PublishTimeout != 3*time.Second {
 		t.Errorf("PublishTimeout = %s, want 3s", applicationConfiguration.PublishTimeout)
+	}
+
+	expectedRabbitMQReconnectBackoffDelays := []time.Duration{250 * time.Millisecond, 2 * time.Second, 15 * time.Second}
+
+	if len(applicationConfiguration.RabbitMQReconnectBackoffDelays) != len(expectedRabbitMQReconnectBackoffDelays) {
+		t.Fatalf("RabbitMQReconnectBackoffDelays has %d entries, want %d", len(applicationConfiguration.RabbitMQReconnectBackoffDelays), len(expectedRabbitMQReconnectBackoffDelays))
+	}
+
+	for reconnectBackoffDelayIndex, expectedReconnectBackoffDelay := range expectedRabbitMQReconnectBackoffDelays {
+		if applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex] != expectedReconnectBackoffDelay {
+			t.Errorf("RabbitMQReconnectBackoffDelays[%d] = %s, want %s", reconnectBackoffDelayIndex, applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex], expectedReconnectBackoffDelay)
+		}
 	}
 
 	if applicationConfiguration.PipelineWorkerCount != 8 {
@@ -342,6 +367,20 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 				environmentVariables[environmentNameWriteRetryBackoffDelayList] = "1s,whenever"
 			},
 			expectedErrorSubstrings: []string{"RETRY_BACKOFFS", "not a valid duration"},
+		},
+		{
+			name: "reconnect backoff list contains a zero duration",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "1s,0s"
+			},
+			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS", "positive durations"},
+		},
+		{
+			name: "reconnect backoff list contains a non duration",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "soon"
+			},
+			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS", "not a valid duration"},
 		},
 		{
 			name: "consumer batch size exceeds the raw logs buffer",
