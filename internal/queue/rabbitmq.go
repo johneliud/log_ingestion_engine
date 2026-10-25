@@ -108,6 +108,48 @@ func (publisher *Publisher) declareTopology(channel *amqp.Channel) error {
 	return nil
 }
 
+// Publish publishes a log with timeout and activates fallback on failure.
+func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
+	publisher.mutex.RLock()
+	isConnected := publisher.isConnected
+	channel := publisher.channel
+	publisher.mutex.RUnlock()
+
+	if isConnected && channel != nil {
+		publishContext, publishContextCancel := context.WithTimeout(context.Background(), publisher.applicationConfiguration.PublishTimeout)
+		defer publishContextCancel()
+
+		body, marshalError := json.Marshal(enrichedLog)
+		if marshalError != nil {
+			return marshalError
+		}
+
+		publishError := channel.PublishWithContext(
+			publishContext,
+			exchangeNameForDestination(enrichedLog.Destination),
+			config.RoutingKeyLogWrite,
+			false,
+			false,
+			amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Body:         body,
+			},
+		)
+		if publishError == nil {
+			return nil
+		}
+		slog.Error("publishing to rabbitmq failed, using fallback", "error", publishError, "destination", enrichedLog.Destination)
+		publisher.mutex.Lock()
+		publisher.isConnected = false
+		publisher.mutex.Unlock()
+	} else {
+		slog.Warn("rabbitmq not connected, using in-memory fallback", "destination", enrichedLog.Destination)
+	}
+
+	return publisher.publishToFallback(enrichedLog)
+}
+
 func (publisher *Publisher) publishToFallback(enrichedLog model.EnrichedLog) error {
 	select {
 	case publisher.fallbackChannel <- enrichedLogMessage{EnrichedLog: enrichedLog}:
