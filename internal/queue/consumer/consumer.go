@@ -31,18 +31,15 @@ func NewQueueConsumer(applicationConfiguration config.ApplicationConfiguration, 
 	}
 }
 
-// Start starts consumers per destination.
+// Start starts consumers.
 func (queueConsumer *QueueConsumer) Start(applicationContext context.Context) <-chan struct{} {
 	completed := make(chan struct{})
 	var waitGroup sync.WaitGroup
-	destinations := []model.Destination{model.DestinationService1, model.DestinationService2, model.DestinationService3}
-	waitGroup.Add(len(destinations))
-	for _, destination := range destinations {
-		go func(destinationValue model.Destination) {
-			defer waitGroup.Done()
-			queueConsumer.consumeForDestination(applicationContext, destinationValue)
-		}(destination)
-	}
+	waitGroup.Add(1)
+	go func() {
+		defer waitGroup.Done()
+		queueConsumer.consume(applicationContext)
+	}()
 	go func() {
 		waitGroup.Wait()
 		close(completed)
@@ -50,7 +47,7 @@ func (queueConsumer *QueueConsumer) Start(applicationContext context.Context) <-
 	return completed
 }
 
-func (queueConsumer *QueueConsumer) consumeForDestination(applicationContext context.Context, destination model.Destination) {
+func (queueConsumer *QueueConsumer) consume(applicationContext context.Context) {
 	for {
 		select {
 		case <-applicationContext.Done():
@@ -59,15 +56,9 @@ func (queueConsumer *QueueConsumer) consumeForDestination(applicationContext con
 			if !ok {
 				return
 			}
-			if enrichedLog.Destination == destination {
-				logs := []model.EnrichedLog{enrichedLog}
-				if err := queueConsumer.storageHandler.StoreBatch(destination, logs); err != nil {
-					slog.Error("failed to store batch", "error", err, "destination", destination)
-					return
-				}
+			if err := queueConsumer.storageHandler.StoreBatch(enrichedLog.Destination, []model.EnrichedLog{enrichedLog}); err != nil {
+				slog.Error("failed to store batch", "error", err, "destination", enrichedLog.Destination)
 			}
-		default:
-			return
 		}
 	}
 }

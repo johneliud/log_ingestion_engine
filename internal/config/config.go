@@ -25,6 +25,7 @@ const (
 	environmentNameRabbitMQUsername                 = "RABBITMQ_USER"
 	environmentNameRabbitMQPassword                 = "RABBITMQ_PASS"
 	environmentNameRabbitMQManagementURL            = "RABBITMQ_MGMT_URL"
+	environmentNameRabbitMQUseTLS                   = "RABBITMQ_USE_TLS"
 	environmentNamePublishTimeout                   = "PUBLISH_TIMEOUT"
 	environmentNamePipelineWorkerCount              = "PIPELINE_WORKER_COUNT"
 	environmentNameWriteBatchSize                   = "WRITE_BATCH_SIZE"
@@ -48,6 +49,7 @@ const (
 	defaultRoutingConfigurationFilePath     = "configs/routing.json"
 	service1Destination                     = "service1"
 	defaultPublishTimeout                   = 5 * time.Second
+	defaultRabbitMQUseTLS                   = false
 	defaultPipelineWorkerCount              = 4
 	defaultWriteBatchSize                   = 100
 	defaultWriteFlushInterval               = time.Second
@@ -88,6 +90,7 @@ type ApplicationConfiguration struct {
 	RabbitMQUsername                 string
 	RabbitMQPassword                 string
 	RabbitMQManagementURL            string
+	RabbitMQUseTLS                   bool
 	PublishTimeout                   time.Duration
 	PipelineWorkerCount              int
 	WriteBatchSize                   int
@@ -210,6 +213,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, rabbitMQManagementURLError
 	}
 	applicationConfiguration.RabbitMQManagementURL = rabbitMQManagementURL
+
+	rabbitMQUseTLS, rabbitMQUseTLSError := parseBooleanSetting(environmentVariables, environmentNameRabbitMQUseTLS, defaultRabbitMQUseTLS)
+	if rabbitMQUseTLSError != nil {
+		return ApplicationConfiguration{}, rabbitMQUseTLSError
+	}
+	applicationConfiguration.RabbitMQUseTLS = rabbitMQUseTLS
 
 	publishTimeout, publishTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNamePublishTimeout, defaultPublishTimeout)
 	if publishTimeoutError != nil {
@@ -372,4 +381,19 @@ func parseStringSetting(environmentVariables map[string]string, settingName stri
 		return defaultValue, nil
 	}
 	return settingValue, nil
+}
+
+// Returns the boolean for the setting, falling back to the default when missing or empty.
+func parseBooleanSetting(environmentVariables map[string]string, settingName string, defaultValue bool) (bool, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return defaultValue, nil
+	}
+
+	parsedSettingValue, parsingError := strconv.ParseBool(rawSettingValue)
+	if parsingError != nil {
+		return false, fmt.Errorf("environment variable %s has value %q, which is not a valid boolean: %w", settingName, rawSettingValue, parsingError)
+	}
+
+	return parsedSettingValue, nil
 }

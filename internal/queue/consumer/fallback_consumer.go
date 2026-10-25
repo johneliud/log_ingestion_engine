@@ -26,30 +26,23 @@ func NewFallbackProcessor(fallbackChannel <-chan model.EnrichedLog, storageHandl
 func (fallbackProcessor *FallbackProcessor) Start(applicationContext context.Context) <-chan struct{} {
 	completed := make(chan struct{})
 	var waitGroup sync.WaitGroup
-	destinations := []model.Destination{model.DestinationService1, model.DestinationService2, model.DestinationService3}
-	for _, destination := range destinations {
-		waitGroup.Add(1)
-		go func(destinationValue model.Destination) {
-			defer waitGroup.Done()
-			for {
-				select {
-				case <-applicationContext.Done():
+	waitGroup.Add(1)
+	go func() {
+		defer waitGroup.Done()
+		for {
+			select {
+			case <-applicationContext.Done():
+				return
+			case enrichedLog, ok := <-fallbackProcessor.fallbackChannel:
+				if !ok {
 					return
-				case enrichedLog, ok := <-fallbackProcessor.fallbackChannel:
-					if !ok {
-						return
-					}
-					
-					if enrichedLog.Destination == destinationValue {
-						if err := fallbackProcessor.storageHandler.StoreBatch(destinationValue, []model.EnrichedLog{enrichedLog}); err != nil {
-							slog.Error("failed to store from fallback", "error", err, "destination", destinationValue)
-							continue
-						}
-					}
+				}
+				if err := fallbackProcessor.storageHandler.StoreBatch(enrichedLog.Destination, []model.EnrichedLog{enrichedLog}); err != nil {
+					slog.Error("failed to store from fallback", "error", err, "destination", enrichedLog.Destination)
 				}
 			}
-		}(destination)
-	}
+		}
+	}()
 	go func() {
 		waitGroup.Wait()
 		close(completed)

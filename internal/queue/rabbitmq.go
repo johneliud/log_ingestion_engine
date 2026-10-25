@@ -48,8 +48,12 @@ func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fall
 
 // Connects to RabbitMQ and declares topology.
 func (publisher *Publisher) Connect() error {
+	scheme := "amqp"
+	if publisher.applicationConfiguration.RabbitMQUseTLS {
+		scheme = "amqps"
+	}
 	connectionURL := url.URL{
-		Scheme: brokerSchemeForHost(publisher.applicationConfiguration.RabbitMQHost),
+		Scheme: scheme,
 		User:   url.UserPassword(publisher.applicationConfiguration.RabbitMQUsername, publisher.applicationConfiguration.RabbitMQPassword),
 		Host:   net.JoinHostPort(publisher.applicationConfiguration.RabbitMQHost, strconv.Itoa(publisher.applicationConfiguration.RabbitMQPort)),
 	}
@@ -113,13 +117,6 @@ func (publisher *Publisher) Connect() error {
 }
 
 // Returns the AMQP scheme for the broker host, using TLS for remote deployments.
-func brokerSchemeForHost(host string) string {
-	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return "amqp"
-	}
-	return "amqps"
-}
-
 func (publisher *Publisher) declareTopology(channel *amqp.Channel) error {
 	exchanges := []string{config.ExchangeService1Name, config.ExchangeService2Name, config.ExchangeService3Name}
 	queues := []string{config.QueueService1Name, config.QueueService2Name, config.QueueService3Name}
