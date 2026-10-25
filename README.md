@@ -4,6 +4,63 @@
 
 A Go service that accepts logs over HTTP, validates and enriches them, routes them through RabbitMQ, stores them in SQLite and reports metrics.
 
+## Architecture
+
+The source diagram lives in [`docs/architecture.mmd`](docs/architecture.mmd). Every component receives a single `ApplicationConfiguration` loaded from the configuration file and process environment.
+
+```mermaid
+flowchart LR
+    client(["Clients"])
+
+    subgraph ingress["HTTP ingress"]
+        direction TB
+        rateLimit["Rate limiter<br/>per IP, in-memory"]
+        logsEndpoint["POST /logs"]
+        validate["Validate batch<br/>body size + per-entry errors"]
+    end
+
+    rawQueue[("raw_logs<br/>bounded channel")]
+
+    subgraph processing["Pipeline worker pool"]
+        direction TB
+        enrich["Enrich<br/>received_at · source_ip · environment"]
+        route["Route<br/>service → destination rules"]
+    end
+
+    subgraph publishing["Publisher"]
+        direction TB
+        rabbitPublisher["RabbitMQ publisher<br/>persistent + confirms<br/>5s publish timeout<br/>auto-reconnect with backoff"]
+        fallback[("Bounded in-memory fallback<br/>used while disconnected")]
+    end
+
+    broker[("RabbitMQ<br/>exchange_service1..3<br/>queue_service1..3<br/>routing key: log.write")]
+
+    subgraph delivery["Consumers and storage"]
+        direction TB
+        amqpConsumer["AMQP consumers<br/>one per destination queue<br/>ack after stored"]
+        fallbackConsumer["Fallback consumer"]
+        batchWriter["Batch writer<br/>per-destination buffers<br/>retry with backoff"]
+        sqlite[("SQLite<br/>logs_service1.db<br/>logs_service2.db<br/>logs_service3.db")]
+        deadLetters[("Dead-letter NDJSON<br/>rotated by size")]
+        replay["cmd/replay"]
+    end
+
+    client --> rateLimit --> logsEndpoint --> validate --> rawQueue
+    rawQueue --> enrich --> route --> rabbitPublisher
+    rabbitPublisher -->|"connected"| broker
+    rabbitPublisher -->|"publish fails"| fallback
+    broker -->|"deliver"| amqpConsumer
+    fallback -->|"stored directly, never re-published"| fallbackConsumer
+    amqpConsumer --> batchWriter
+    fallbackConsumer --> batchWriter
+    batchWriter -->|"stored"| sqlite
+    batchWriter -->|"retries exhausted"| deadLetters
+    deadLetters -.-> replay
+    replay -.->|"replay"| sqlite
+```
+
+Clients pass through the rate limiter to `POST /logs`, where the batch is validated and pushed into the bounded `raw_logs` channel. Pipeline workers enrich and route each log before the publisher sends it to RabbitMQ; if publishing fails, the log enters the bounded fallback instead. Consumers write through the retrying batch writer into one SQLite database per destination, and logs whose retries are exhausted go to the dead-letter file for later replay.
+
 ## Clone
 
 ```bash
