@@ -30,6 +30,7 @@ func (fallbackProcessor *FallbackProcessor) Start(applicationContext context.Con
 		for {
 			select {
 			case <-applicationContext.Done():
+				fallbackProcessor.drainFallback()
 				return
 			case enrichedLog, ok := <-fallbackProcessor.fallbackChannel:
 				if !ok {
@@ -46,4 +47,21 @@ func (fallbackProcessor *FallbackProcessor) Start(applicationContext context.Con
 		close(completed)
 	}()
 	return completed
+}
+
+// Stores buffered fallback logs before shutdown completes.
+func (fallbackProcessor *FallbackProcessor) drainFallback() {
+	for {
+		select {
+		case enrichedLog, ok := <-fallbackProcessor.fallbackChannel:
+			if !ok {
+				return
+			}
+			if err := fallbackProcessor.storageHandler.StoreBatch(enrichedLog.Destination, []model.EnrichedLog{enrichedLog}); err != nil {
+				slog.Error("failed to store from fallback", "error", err, "destination", enrichedLog.Destination)
+			}
+		default:
+			return
+		}
+	}
 }

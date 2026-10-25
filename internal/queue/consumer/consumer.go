@@ -49,6 +49,7 @@ func (queueConsumer *QueueConsumer) consume(applicationContext context.Context) 
 	for {
 		select {
 		case <-applicationContext.Done():
+			queueConsumer.drainFallback()
 			return
 		case enrichedLog, ok := <-queueConsumer.fallbackChannel:
 			if !ok {
@@ -57,6 +58,23 @@ func (queueConsumer *QueueConsumer) consume(applicationContext context.Context) 
 			if err := queueConsumer.storageHandler.StoreBatch(enrichedLog.Destination, []model.EnrichedLog{enrichedLog}); err != nil {
 				slog.Error("failed to store batch", "error", err, "destination", enrichedLog.Destination)
 			}
+		}
+	}
+}
+
+// Stores buffered fallback logs before shutdown completes.
+func (queueConsumer *QueueConsumer) drainFallback() {
+	for {
+		select {
+		case enrichedLog, ok := <-queueConsumer.fallbackChannel:
+			if !ok {
+				return
+			}
+			if err := queueConsumer.storageHandler.StoreBatch(enrichedLog.Destination, []model.EnrichedLog{enrichedLog}); err != nil {
+				slog.Error("failed to store batch", "error", err, "destination", enrichedLog.Destination)
+			}
+		default:
+			return
 		}
 	}
 }
