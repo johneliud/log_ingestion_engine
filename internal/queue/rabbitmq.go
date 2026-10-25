@@ -52,12 +52,6 @@ func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fall
 
 // Connects to RabbitMQ and declares topology.
 func (publisher *Publisher) Connect() error {
-	publisher.mutex.Lock()
-	defer publisher.mutex.Unlock()
-
-	previousChannel := publisher.channel
-	previousConnection := publisher.connection
-
 	connectionURL := url.URL{
 		Scheme: brokerSchemeForHost(publisher.applicationConfiguration.RabbitMQHost),
 		User:   url.UserPassword(publisher.applicationConfiguration.RabbitMQUsername, publisher.applicationConfiguration.RabbitMQPassword),
@@ -67,7 +61,9 @@ func (publisher *Publisher) Connect() error {
 
 	connection, connectionError := amqp.Dial(connectionString)
 	if connectionError != nil {
+		publisher.mutex.Lock()
 		publisher.isConnected = false
+		publisher.mutex.Unlock()
 		slog.Warn("failed to connect to rabbitmq, activating in-memory fallback", "error", connectionError)
 		return connectionError
 	}
@@ -75,7 +71,9 @@ func (publisher *Publisher) Connect() error {
 	channel, channelError := connection.Channel()
 	if channelError != nil {
 		connection.Close()
+		publisher.mutex.Lock()
 		publisher.isConnected = false
+		publisher.mutex.Unlock()
 		slog.Warn("failed to open rabbitmq channel, activating in-memory fallback", "error", channelError)
 		return channelError
 	}
@@ -83,22 +81,38 @@ func (publisher *Publisher) Connect() error {
 	if err := publisher.declareTopology(channel); err != nil {
 		channel.Close()
 		connection.Close()
+		publisher.mutex.Lock()
 		publisher.isConnected = false
+		publisher.mutex.Unlock()
 		slog.Warn("failed to declare rabbitmq topology, activating in-memory fallback", "error", err)
 		return err
 	}
 
+	if confirmError := channel.Confirm(false); confirmError != nil {
+		channel.Close()
+		connection.Close()
+		publisher.mutex.Lock()
+		publisher.isConnected = false
+		publisher.mutex.Unlock()
+		slog.Warn("failed to confirm rabbitmq publishing, activating in-memory fallback", "error", confirmError)
+		return confirmError
+	}
+
+	publisher.mutex.Lock()
+	previousChannel := publisher.channel
+	previousConnection := publisher.connection
 	if previousChannel != nil {
 		previousChannel.Close()
 	}
 	if previousConnection != nil {
 		previousConnection.Close()
 	}
-
 	publisher.connection = connection
 	publisher.channel = channel
+	publisher.returns = channel.NotifyReturn(make(chan amqp.Return, 64))
 	publisher.isConnected = true
-	channel.NotifyReturn(publisher.returns)
+	publisher.mutex.Unlock()
+
 	return nil
 }
 
