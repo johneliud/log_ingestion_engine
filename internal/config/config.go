@@ -10,30 +10,33 @@ import (
 )
 
 const (
-	environmentNameHTTPPort                         = "HTTP_PORT"
-	environmentNameRateLimitPerSecond               = "RATE_LIMIT"
-	environmentNameRateLimitCleanupInterval         = "RATE_LIMIT_CLEANUP_INTERVAL"
-	environmentNameRawLogsBufferSize                = "RAW_LOGS_BUFFER"
-	environmentNameConsumerBatchSize                = "CONSUMER_BATCH_SIZE"
-	environmentNameChannelSendTimeout               = "CHANNEL_SEND_TIMEOUT"
-	environmentNameMaximumBodySizeInBytes           = "MAX_BODY_BYTES"
-	environmentNameApplicationEnvironment           = "APP_ENV"
-	environmentNameRoutingConfigurationFilePath     = "ROUTING_CONFIG_PATH"
-	environmentNameDefaultDestination               = "DEFAULT_DESTINATION"
-	environmentNameRabbitMQHost                     = "RABBITMQ_HOST"
-	environmentNameRabbitMQPort                     = "RABBITMQ_PORT"
-	environmentNameRabbitMQUsername                 = "RABBITMQ_USER"
-	environmentNameRabbitMQPassword                 = "RABBITMQ_PASS"
-	environmentNameRabbitMQManagementURL            = "RABBITMQ_MGMT_URL"
-	environmentNamePublishTimeout                   = "PUBLISH_TIMEOUT"
-	environmentNamePipelineWorkerCount              = "PIPELINE_WORKER_COUNT"
-	environmentNameWriteBatchSize                   = "WRITE_BATCH_SIZE"
-	environmentNameWriteFlushInterval               = "WRITE_FLUSH_INTERVAL"
-	environmentNameDatabaseDirectoryPath            = "DB_DIR"
-	environmentNameConfigurationFilePath            = "CONFIG_FILE_PATH"
-	environmentNameWriteRetryBackoffDelayList       = "RETRY_BACKOFFS"
-	environmentNameDeadLetterFilePath               = "DEAD_LETTER_PATH"
-	environmentNameDeadLetterMaximumFileSizeInBytes = "DEAD_LETTER_MAX_BYTES"
+	environmentNameHTTPPort                          = "HTTP_PORT"
+	environmentNameRateLimitPerSecond                = "RATE_LIMIT"
+	environmentNameRateLimitCleanupInterval          = "RATE_LIMIT_CLEANUP_INTERVAL"
+	environmentNameRawLogsBufferSize                 = "RAW_LOGS_BUFFER"
+	environmentNameConsumerBatchSize                 = "CONSUMER_BATCH_SIZE"
+	environmentNameChannelSendTimeout                = "CHANNEL_SEND_TIMEOUT"
+	environmentNameMaximumBodySizeInBytes            = "MAX_BODY_BYTES"
+	environmentNameApplicationEnvironment            = "APP_ENV"
+	environmentNameRoutingConfigurationFilePath      = "ROUTING_CONFIG_PATH"
+	environmentNameDefaultDestination                = "DEFAULT_DESTINATION"
+	environmentNameRabbitMQHost                      = "RABBITMQ_HOST"
+	environmentNameRabbitMQPort                      = "RABBITMQ_PORT"
+	environmentNameRabbitMQUsername                  = "RABBITMQ_USER"
+	environmentNameRabbitMQPassword                  = "RABBITMQ_PASS"
+	environmentNameRabbitMQManagementURL             = "RABBITMQ_MGMT_URL"
+	environmentNameRabbitMQUseTLS                    = "RABBITMQ_USE_TLS"
+	environmentNamePublishTimeout                    = "PUBLISH_TIMEOUT"
+	environmentNameRabbitMQReconnectBackoffDelayList = "RABBITMQ_RECONNECT_BACKOFFS"
+	environmentNamePipelineWorkerCount               = "PIPELINE_WORKER_COUNT"
+	environmentNameWriteBatchSize                    = "WRITE_BATCH_SIZE"
+	environmentNameWriteFlushInterval                = "WRITE_FLUSH_INTERVAL"
+	environmentNameDatabaseDirectoryPath             = "DB_DIR"
+	environmentNameDatabaseBusyTimeout               = "DB_BUSY_TIMEOUT"
+	environmentNameConfigurationFilePath             = "CONFIG_FILE_PATH"
+	environmentNameWriteRetryBackoffDelayList        = "RETRY_BACKOFFS"
+	environmentNameDeadLetterFilePath                = "DEAD_LETTER_PATH"
+	environmentNameDeadLetterMaximumFileSizeInBytes  = "DEAD_LETTER_MAX_BYTES"
 )
 
 const (
@@ -48,16 +51,34 @@ const (
 	defaultRoutingConfigurationFilePath     = "configs/routing.json"
 	service1Destination                     = "service1"
 	defaultPublishTimeout                   = 5 * time.Second
+	defaultRabbitMQUseTLS                   = false
 	defaultPipelineWorkerCount              = 4
 	defaultWriteBatchSize                   = 100
 	defaultWriteFlushInterval               = time.Second
 	defaultDatabaseDirectoryPath            = "./data"
+	defaultDatabaseBusyTimeout              = 5 * time.Second
 	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
+
+	RoutingKeyLogWrite = "log.write"
+
+	ExchangeService1Name = "exchange_service1"
+	ExchangeService2Name = "exchange_service2"
+	ExchangeService3Name = "exchange_service3"
+
+	QueueService1Name = "queue_service1"
+	QueueService2Name = "queue_service2"
+	QueueService3Name = "queue_service3"
+
+	DatabaseFileService1Name = "logs_service1.db"
+	DatabaseFileService2Name = "logs_service2.db"
+	DatabaseFileService3Name = "logs_service3.db"
 )
 
 var defaultWriteRetryBackoffDelays = []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
+
+var defaultRabbitMQReconnectBackoffDelays = []time.Duration{time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
 
 var errMissingRequiredSetting = errors.New("required environment variable is not set")
 
@@ -78,11 +99,14 @@ type ApplicationConfiguration struct {
 	RabbitMQUsername                 string
 	RabbitMQPassword                 string
 	RabbitMQManagementURL            string
+	RabbitMQUseTLS                   bool
 	PublishTimeout                   time.Duration
+	RabbitMQReconnectBackoffDelays   []time.Duration
 	PipelineWorkerCount              int
 	WriteBatchSize                   int
 	WriteFlushInterval               time.Duration
 	DatabaseDirectoryPath            string
+	DatabaseBusyTimeout              time.Duration
 	WriteRetryBackoffDelays          []time.Duration
 	DeadLetterFilePath               string
 	DeadLetterMaximumFileSizeInBytes int
@@ -201,11 +225,23 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.RabbitMQManagementURL = rabbitMQManagementURL
 
+	rabbitMQUseTLS, rabbitMQUseTLSError := parseBooleanSetting(environmentVariables, environmentNameRabbitMQUseTLS, defaultRabbitMQUseTLS)
+	if rabbitMQUseTLSError != nil {
+		return ApplicationConfiguration{}, rabbitMQUseTLSError
+	}
+	applicationConfiguration.RabbitMQUseTLS = rabbitMQUseTLS
+
 	publishTimeout, publishTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNamePublishTimeout, defaultPublishTimeout)
 	if publishTimeoutError != nil {
 		return ApplicationConfiguration{}, publishTimeoutError
 	}
 	applicationConfiguration.PublishTimeout = publishTimeout
+
+	rabbitMQReconnectBackoffDelays, rabbitMQReconnectBackoffDelayListError := parsePositiveDurationListSetting(environmentVariables, environmentNameRabbitMQReconnectBackoffDelayList, defaultRabbitMQReconnectBackoffDelays)
+	if rabbitMQReconnectBackoffDelayListError != nil {
+		return ApplicationConfiguration{}, rabbitMQReconnectBackoffDelayListError
+	}
+	applicationConfiguration.RabbitMQReconnectBackoffDelays = rabbitMQReconnectBackoffDelays
 
 	pipelineWorkerCount, pipelineWorkerCountError := parsePositiveIntegerSetting(environmentVariables, environmentNamePipelineWorkerCount, defaultPipelineWorkerCount)
 	if pipelineWorkerCountError != nil {
@@ -230,6 +266,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, databaseDirectoryPathError
 	}
 	applicationConfiguration.DatabaseDirectoryPath = databaseDirectoryPath
+
+	databaseBusyTimeout, databaseBusyTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNameDatabaseBusyTimeout, defaultDatabaseBusyTimeout)
+	if databaseBusyTimeoutError != nil {
+		return ApplicationConfiguration{}, databaseBusyTimeoutError
+	}
+	applicationConfiguration.DatabaseBusyTimeout = databaseBusyTimeout
 
 	writeRetryBackoffDelays, writeRetryBackoffDelayListError := parsePositiveDurationListSetting(environmentVariables, environmentNameWriteRetryBackoffDelayList, defaultWriteRetryBackoffDelays)
 	if writeRetryBackoffDelayListError != nil {
@@ -362,4 +404,19 @@ func parseStringSetting(environmentVariables map[string]string, settingName stri
 		return defaultValue, nil
 	}
 	return settingValue, nil
+}
+
+// Returns the boolean for the setting, falling back to the default when missing or empty.
+func parseBooleanSetting(environmentVariables map[string]string, settingName string, defaultValue bool) (bool, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return defaultValue, nil
+	}
+
+	parsedSettingValue, parsingError := strconv.ParseBool(rawSettingValue)
+	if parsingError != nil {
+		return false, fmt.Errorf("environment variable %s has value %q, which is not a valid boolean: %w", settingName, rawSettingValue, parsingError)
+	}
+
+	return parsedSettingValue, nil
 }

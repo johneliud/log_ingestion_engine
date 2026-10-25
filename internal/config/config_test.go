@@ -73,6 +73,18 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("PublishTimeout = %s, want %s", applicationConfiguration.PublishTimeout, defaultPublishTimeout)
 	}
 
+	expectedRabbitMQReconnectBackoffDelays := []time.Duration{time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+
+	if len(applicationConfiguration.RabbitMQReconnectBackoffDelays) != len(expectedRabbitMQReconnectBackoffDelays) {
+		t.Fatalf("RabbitMQReconnectBackoffDelays has %d entries, want %d", len(applicationConfiguration.RabbitMQReconnectBackoffDelays), len(expectedRabbitMQReconnectBackoffDelays))
+	}
+
+	for reconnectBackoffDelayIndex, expectedReconnectBackoffDelay := range expectedRabbitMQReconnectBackoffDelays {
+		if applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex] != expectedReconnectBackoffDelay {
+			t.Errorf("RabbitMQReconnectBackoffDelays[%d] = %s, want %s", reconnectBackoffDelayIndex, applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex], expectedReconnectBackoffDelay)
+		}
+	}
+
 	if applicationConfiguration.PipelineWorkerCount != defaultPipelineWorkerCount {
 		t.Errorf("PipelineWorkerCount = %d, want %d", applicationConfiguration.PipelineWorkerCount, defaultPipelineWorkerCount)
 	}
@@ -87,6 +99,10 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 
 	if applicationConfiguration.DatabaseDirectoryPath != defaultDatabaseDirectoryPath {
 		t.Errorf("DatabaseDirectoryPath = %q, want %q", applicationConfiguration.DatabaseDirectoryPath, defaultDatabaseDirectoryPath)
+	}
+
+	if applicationConfiguration.DatabaseBusyTimeout != defaultDatabaseBusyTimeout {
+		t.Errorf("DatabaseBusyTimeout = %s, want %s", applicationConfiguration.DatabaseBusyTimeout, defaultDatabaseBusyTimeout)
 	}
 
 	if applicationConfiguration.DeadLetterFilePath != defaultDeadLetterFilePath {
@@ -123,10 +139,12 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameRabbitMQPort] = "5673"
 	environmentVariables[environmentNameRabbitMQManagementURL] = "https://broker.internal:15672"
 	environmentVariables[environmentNamePublishTimeout] = "3s"
+	environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "250ms, 2s, 15s"
 	environmentVariables[environmentNamePipelineWorkerCount] = "8"
 	environmentVariables[environmentNameWriteBatchSize] = "200"
 	environmentVariables[environmentNameWriteFlushInterval] = "2s"
 	environmentVariables[environmentNameDatabaseDirectoryPath] = "/var/log-engine"
+	environmentVariables[environmentNameDatabaseBusyTimeout] = "2500ms"
 	environmentVariables[environmentNameWriteRetryBackoffDelayList] = "500ms, 2s, 4s, 8s"
 	environmentVariables[environmentNameDeadLetterFilePath] = "failed/letters.jsonl"
 	environmentVariables[environmentNameDeadLetterMaximumFileSizeInBytes] = "20971520"
@@ -192,6 +210,18 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 		t.Errorf("PublishTimeout = %s, want 3s", applicationConfiguration.PublishTimeout)
 	}
 
+	expectedRabbitMQReconnectBackoffDelays := []time.Duration{250 * time.Millisecond, 2 * time.Second, 15 * time.Second}
+
+	if len(applicationConfiguration.RabbitMQReconnectBackoffDelays) != len(expectedRabbitMQReconnectBackoffDelays) {
+		t.Fatalf("RabbitMQReconnectBackoffDelays has %d entries, want %d", len(applicationConfiguration.RabbitMQReconnectBackoffDelays), len(expectedRabbitMQReconnectBackoffDelays))
+	}
+
+	for reconnectBackoffDelayIndex, expectedReconnectBackoffDelay := range expectedRabbitMQReconnectBackoffDelays {
+		if applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex] != expectedReconnectBackoffDelay {
+			t.Errorf("RabbitMQReconnectBackoffDelays[%d] = %s, want %s", reconnectBackoffDelayIndex, applicationConfiguration.RabbitMQReconnectBackoffDelays[reconnectBackoffDelayIndex], expectedReconnectBackoffDelay)
+		}
+	}
+
 	if applicationConfiguration.PipelineWorkerCount != 8 {
 		t.Errorf("PipelineWorkerCount = %d, want 8", applicationConfiguration.PipelineWorkerCount)
 	}
@@ -206,6 +236,10 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 
 	if applicationConfiguration.DatabaseDirectoryPath != "/var/log-engine" {
 		t.Errorf("DatabaseDirectoryPath = %q, want %q", applicationConfiguration.DatabaseDirectoryPath, "/var/log-engine")
+	}
+
+	if applicationConfiguration.DatabaseBusyTimeout != 2500*time.Millisecond {
+		t.Errorf("DatabaseBusyTimeout = %s, want 2.5s", applicationConfiguration.DatabaseBusyTimeout)
 	}
 
 	expectedRetryBackoffDelays := []time.Duration{500 * time.Millisecond, 2 * time.Second, 4 * time.Second, 8 * time.Second}
@@ -314,6 +348,13 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 			expectedErrorSubstrings: []string{"WRITE_BATCH_SIZE", "positive integer"},
 		},
 		{
+			name: "database busy timeout is not positive",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameDatabaseBusyTimeout] = "0s"
+			},
+			expectedErrorSubstrings: []string{"DB_BUSY_TIMEOUT", "positive duration"},
+		},
+		{
 			name: "retry backoff list contains a zero duration",
 			environmentMutation: func(environmentVariables map[string]string) {
 				environmentVariables[environmentNameWriteRetryBackoffDelayList] = "1s,0s,10s"
@@ -326,6 +367,20 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 				environmentVariables[environmentNameWriteRetryBackoffDelayList] = "1s,whenever"
 			},
 			expectedErrorSubstrings: []string{"RETRY_BACKOFFS", "not a valid duration"},
+		},
+		{
+			name: "reconnect backoff list contains a zero duration",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "1s,0s"
+			},
+			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS", "positive durations"},
+		},
+		{
+			name: "reconnect backoff list contains a non duration",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "soon"
+			},
+			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS", "not a valid duration"},
 		},
 		{
 			name: "consumer batch size exceeds the raw logs buffer",
