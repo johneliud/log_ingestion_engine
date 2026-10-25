@@ -42,10 +42,26 @@ func aRecordingBatchStore(recordedBatches chan<- recordedBatch) batchStore {
 	}
 }
 
+// Returns a batch store that records every failed attempt and reports an error.
+func aFailingBatchStore(attemptedBatches chan<- []model.EnrichedLog) batchStore {
+	return func(destination model.Destination, enrichedLogs []model.EnrichedLog) error {
+		attemptedBatches <- enrichedLogs
+		return errors.New("store unavailable")
+	}
+}
+
+// Returns a retry waiter that records delays instead of sleeping.
+func aRecordingRetryWaiter(recordedDelays chan<- time.Duration) retryWaiter {
+	return func(applicationContext context.Context, retryDelay time.Duration) error {
+		recordedDelays <- retryDelay
+		return nil
+	}
+}
+
 func TestBatchWriter_FlushesWhenWriteBatchSizeIsReached(t *testing.T) {
 	t.Parallel()
 	recordedBatches := make(chan recordedBatch, 1)
-	batchWriter := NewBatchWriter(3, aRecordingBatchStore(recordedBatches))
+	batchWriter := NewBatchWriter(BatchWriterDependencies{WriteBatchSize: 3, StoreBatch: aRecordingBatchStore(recordedBatches)})
 
 	storeError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog(), anEnrichedLog(), anEnrichedLog()})
 	if storeError != nil {
@@ -68,7 +84,7 @@ func TestBatchWriter_FlushesWhenWriteBatchSizeIsReached(t *testing.T) {
 func TestBatchWriter_DoesNotFlushBelowWriteBatchSize(t *testing.T) {
 	t.Parallel()
 	recordedBatches := make(chan recordedBatch, 1)
-	batchWriter := NewBatchWriter(3, aRecordingBatchStore(recordedBatches))
+	batchWriter := NewBatchWriter(BatchWriterDependencies{WriteBatchSize: 3, StoreBatch: aRecordingBatchStore(recordedBatches)})
 
 	if storeError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog(), anEnrichedLog()}); storeError != nil {
 		t.Fatalf("StoreBatch returned error: %v", storeError)
@@ -84,7 +100,7 @@ func TestBatchWriter_DoesNotFlushBelowWriteBatchSize(t *testing.T) {
 func TestBatchWriter_FlushesWhenTriggerSignalFires(t *testing.T) {
 	t.Parallel()
 	recordedBatches := make(chan recordedBatch, 1)
-	batchWriter := NewBatchWriter(100, aRecordingBatchStore(recordedBatches))
+	batchWriter := NewBatchWriter(BatchWriterDependencies{WriteBatchSize: 100, StoreBatch: aRecordingBatchStore(recordedBatches)})
 	flushTrigger := make(chan struct{}, 1)
 	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
 	defer applicationContextCancellation()
@@ -111,9 +127,12 @@ func TestBatchWriter_FlushesWhenTriggerSignalFires(t *testing.T) {
 func TestBatchWriter_RetainsLogsWhenStoreFails(t *testing.T) {
 	t.Parallel()
 	storeAttemptCount := 0
-	batchWriter := NewBatchWriter(1, func(destination model.Destination, enrichedLogs []model.EnrichedLog) error {
-		storeAttemptCount++
-		return errors.New("store unavailable")
+	batchWriter := NewBatchWriter(BatchWriterDependencies{
+		WriteBatchSize: 1,
+		StoreBatch: func(destination model.Destination, enrichedLogs []model.EnrichedLog) error {
+			storeAttemptCount++
+			return errors.New("store unavailable")
+		},
 	})
 
 	flushError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog()})
@@ -124,6 +143,97 @@ func TestBatchWriter_RetainsLogsWhenStoreFails(t *testing.T) {
 	batchWriter.FlushAll()
 	if storeAttemptCount != 2 {
 		t.Fatalf("store attempt count = %d, want 2; failed logs must stay buffered", storeAttemptCount)
+	}
+}
+
+func TestBatchWriter_RetriesAtConfiguredBackoffIntervalsAndTracksRetryCount(t *testing.T) {
+	t.Parallel()
+	attemptedBatches := make(chan []model.EnrichedLog, 10)
+	recordedDelays := make(chan time.Duration, 10)
+	batchWriter := NewBatchWriter(BatchWriterDependencies{
+		WriteBatchSize:     1,
+		RetryBackoffDelays: []time.Duration{time.Second, 5 * time.Second, 10 * time.Second},
+		StoreBatch:         aFailingBatchStore(attemptedBatches),
+		WaitForRetryDelay:  aRecordingRetryWaiter(recordedDelays),
+	})
+
+	storeError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog()})
+	if storeError == nil {
+		t.Fatal("expected the store failure to be reported after every retry")
+	}
+
+	expectedAttemptCount := 4
+	var lastAttemptedBatch []model.EnrichedLog
+	for attemptIndex := 0; attemptIndex < expectedAttemptCount; attemptIndex++ {
+		select {
+		case lastAttemptedBatch = <-attemptedBatches:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("store attempt %d did not happen", attemptIndex+1)
+		}
+	}
+	select {
+	case <-attemptedBatches:
+		t.Fatal("store was attempted more times than the initial attempt plus every retry")
+	default:
+	}
+
+	expectedRetryDelays := []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
+	for retryIndex, expectedRetryDelay := range expectedRetryDelays {
+		select {
+		case recordedDelay := <-recordedDelays:
+			if recordedDelay != expectedRetryDelay {
+				t.Errorf("retry delay %d = %s, want %s", retryIndex, recordedDelay, expectedRetryDelay)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("retry delay %d was not requested", retryIndex)
+		}
+	}
+
+	if lastAttemptedBatch[0].RetryCount != len(expectedRetryDelays) {
+		t.Errorf("last attempted log retry count = %d, want %d", lastAttemptedBatch[0].RetryCount, len(expectedRetryDelays))
+	}
+}
+
+func TestBatchWriter_FlushesDestinationsConcurrently(t *testing.T) {
+	t.Parallel()
+	enteredDestinations := make(chan model.Destination, 3)
+	releaseFlushes := make(chan struct{})
+	batchWriter := NewBatchWriter(BatchWriterDependencies{
+		WriteBatchSize: 100,
+		StoreBatch: func(destination model.Destination, enrichedLogs []model.EnrichedLog) error {
+			enteredDestinations <- destination
+			<-releaseFlushes
+			return nil
+		},
+	})
+	if storeError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog()}); storeError != nil {
+		t.Fatalf("storing destination service1 log: %v", storeError)
+	}
+	if storeError := batchWriter.StoreBatch(model.DestinationService2, []model.EnrichedLog{anEnrichedLog()}); storeError != nil {
+		t.Fatalf("storing destination service2 log: %v", storeError)
+	}
+
+	flushCompleted := make(chan struct{})
+	go func() {
+		batchWriter.FlushAll()
+		close(flushCompleted)
+	}()
+
+	enteredDestinationNames := make(map[model.Destination]bool)
+	for len(enteredDestinationNames) < 2 {
+		select {
+		case destination := <-enteredDestinations:
+			enteredDestinationNames[destination] = true
+		case <-time.After(2 * time.Second):
+			t.Fatal("one destination's flush stalled the other destination")
+		}
+	}
+
+	close(releaseFlushes)
+	select {
+	case <-flushCompleted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("FlushAll did not finish after releasing the destinations")
 	}
 }
 
