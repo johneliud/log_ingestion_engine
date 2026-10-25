@@ -128,3 +128,23 @@ func (sqliteLogStore *SQLiteLogStore) StoreBatch(destination model.Destination, 
 	return nil
 }
 
+// Closes every open destination database and its insert statement.
+func (sqliteLogStore *SQLiteLogStore) Close() error {
+	var firstCloseError error
+	for _, destinationDatabase := range sqliteLogStore.databases {
+		if closeError := destinationDatabase.insertStatement.Close(); closeError != nil && firstCloseError == nil {
+			firstCloseError = closeError
+		}
+		if closeError := destinationDatabase.database.Close(); closeError != nil && firstCloseError == nil {
+			firstCloseError = closeError
+		}
+	}
+	return firstCloseError
+}
+
+func closeDestinationDatabases(databases map[model.Destination]*destinationDatabase) {
+	for _, destinationDatabase := range databases {
+		destinationDatabase.insertStatement.Close()
+		destinationDatabase.database.Close()
+	}
+}
