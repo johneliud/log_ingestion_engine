@@ -150,70 +150,66 @@ func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
 	publisher.mutex.RLock()
 	isConnected := publisher.isConnected
 	channel := publisher.channel
+	returns := publisher.returns
 	publisher.mutex.RUnlock()
 
-	if isConnected && channel != nil {
-		publishContext, publishContextCancel := context.WithTimeout(context.Background(), publisher.applicationConfiguration.PublishTimeout)
-		defer publishContextCancel()
-
-		body, marshalError := json.Marshal(enrichedLog)
-		if marshalError != nil {
-			return marshalError
-		}
-
-		if confirmError := channel.Confirm(false); confirmError != nil {
-			slog.Error("confirming rabbitmq publishing failed, using fallback", "error", confirmError, "destination", enrichedLog.Destination)
-			publisher.mutex.Lock()
-			publisher.isConnected = false
-			publisher.mutex.Unlock()
-			return publisher.publishToFallback(enrichedLog)
-		}
-
-		deferredConfirmation, publishError := channel.PublishWithDeferredConfirmWithContext(
-			publishContext,
-			exchangeNameForDestination(enrichedLog.Destination),
-			config.RoutingKeyLogWrite,
-			true,
-			false,
-			amqp.Publishing{
-				DeliveryMode: amqp.Persistent,
-				ContentType:  "application/json",
-				Body:         body,
-			},
-		)
-		if publishError != nil {
-			slog.Error("publishing to rabbitmq failed, using fallback", "error", publishError, "destination", enrichedLog.Destination)
-			publisher.mutex.Lock()
-			publisher.isConnected = false
-			publisher.mutex.Unlock()
-			return publisher.publishToFallback(enrichedLog)
-		}
-
-		publishConfirmed := false
-		publishConfirmationError := error(nil)
-		if deferredConfirmation != nil {
-			publishConfirmed, publishConfirmationError = deferredConfirmation.WaitContext(publishContext)
-		}
-		unroutable := false
-		select {
-		case <-publisher.returns:
-			unroutable = true
-		default:
-		}
-		if publishConfirmationError != nil || !publishConfirmed || unroutable {
-			slog.Error("publishing to rabbitmq was not confirmed by the broker, using fallback", "error", publishConfirmationError, "destination", enrichedLog.Destination, "confirmed", publishConfirmed, "unroutable", unroutable)
-			publisher.mutex.Lock()
-			publisher.isConnected = false
-			publisher.mutex.Unlock()
-			return publisher.publishToFallback(enrichedLog)
-		}
-
-		return nil
-	} else {
+	if !isConnected || channel == nil {
 		slog.Warn("rabbitmq not connected, using in-memory fallback", "destination", enrichedLog.Destination)
+		return publisher.publishToFallback(enrichedLog)
 	}
 
-	return publisher.publishToFallback(enrichedLog)
+	if publishError := publisher.publishToBroker(enrichedLog, channel, returns); publishError != nil {
+		publisher.mutex.Lock()
+		publisher.isConnected = false
+		publisher.mutex.Unlock()
+		return publisher.publishToFallback(enrichedLog)
+	}
+
+	return nil
+}
+
+// Publishes an enriched log to RabbitMQ and reports broker failures.
+func (publisher *Publisher) publishToBroker(enrichedLog model.EnrichedLog, channel *amqp.Channel, returns chan amqp.Return) error {
+	publishContext, publishContextCancel := context.WithTimeout(context.Background(), publisher.applicationConfiguration.PublishTimeout)
+	defer publishContextCancel()
+
+	body, marshalError := json.Marshal(enrichedLog)
+	if marshalError != nil {
+		return marshalError
+	}
+
+	deferredConfirmation, publishError := channel.PublishWithDeferredConfirmWithContext(
+		publishContext,
+		exchangeNameForDestination(enrichedLog.Destination),
+		config.RoutingKeyLogWrite,
+		true,
+		false,
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			ContentType:  "application/json",
+			Body:         body,
+		},
+	)
+	if publishError != nil {
+		return publishError
+	}
+
+	publishConfirmed := false
+	publishConfirmationError := error(nil)
+	if deferredConfirmation != nil {
+		publishConfirmed, publishConfirmationError = deferredConfirmation.WaitContext(publishContext)
+	}
+	unroutable := false
+	select {
+	case <-returns:
+		unroutable = true
+	default:
+	}
+	if publishConfirmationError != nil || !publishConfirmed || unroutable {
+		return errors.New("publishing to rabbitmq was not confirmed by the broker")
+	}
+
+	return nil
 }
 
 // Reconnects to RabbitMQ and drains buffered fallback logs.
@@ -232,7 +228,17 @@ func (publisher *Publisher) drainFallback() error {
 		if !hasBufferedLog {
 			return nil
 		}
-		if publishError := publisher.Publish(enrichedLog); publishError != nil {
+		publisher.mutex.RLock()
+		channel := publisher.channel
+		returns := publisher.returns
+		publisher.mutex.RUnlock()
+		if channel == nil {
+			return nil
+		}
+		if publishError := publisher.publishToBroker(enrichedLog, channel, returns); publishError != nil {
+			if fallbackError := publisher.publishToFallback(enrichedLog); fallbackError != nil {
+				return errors.Join(publishError, fallbackError)
+			}
 			return publishError
 		}
 	}
