@@ -46,6 +46,47 @@ func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fall
 	}
 }
 
+// Connects to RabbitMQ and declares topology.
+func (publisher *Publisher) Connect() error {
+	publisher.mutex.Lock()
+	defer publisher.mutex.Unlock()
+
+	connectionString := fmt.Sprintf("amqp://%s:%s@%s:%d/",
+		publisher.applicationConfiguration.RabbitMQUsername,
+		publisher.applicationConfiguration.RabbitMQPassword,
+		publisher.applicationConfiguration.RabbitMQHost,
+		publisher.applicationConfiguration.RabbitMQPort,
+	)
+
+	connection, connectionError := amqp.Dial(connectionString)
+	if connectionError != nil {
+		publisher.isConnected = false
+		slog.Warn("failed to connect to rabbitmq, activating in-memory fallback", "error", connectionError)
+		return connectionError
+	}
+
+	channel, channelError := connection.Channel()
+	if channelError != nil {
+		connection.Close()
+		publisher.isConnected = false
+		slog.Warn("failed to open rabbitmq channel, activating in-memory fallback", "error", channelError)
+		return channelError
+	}
+
+	if err := publisher.declareTopology(channel); err != nil {
+		channel.Close()
+		connection.Close()
+		publisher.isConnected = false
+		slog.Warn("failed to declare rabbitmq topology, activating in-memory fallback", "error", err)
+		return err
+	}
+
+	publisher.connection = connection
+	publisher.channel = channel
+	publisher.isConnected = true
+	return nil
+}
+
 func (publisher *Publisher) publishToFallback(enrichedLog model.EnrichedLog) error {
 	select {
 	case publisher.fallbackChannel <- enrichedLogMessage{EnrichedLog: enrichedLog}:
