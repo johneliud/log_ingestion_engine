@@ -20,17 +20,13 @@ var (
 	ErrNotConnected = errors.New("not connected to rabbitmq")
 )
 
-type enrichedLogMessage struct {
-	EnrichedLog model.EnrichedLog
-}
-
 // Publisher publishes enriched logs to RabbitMQ with timeout and fallback.
 type Publisher struct {
 	mutex                    sync.RWMutex
 	applicationConfiguration config.ApplicationConfiguration
 	connection               *amqp.Connection
 	channel                  *amqp.Channel
-	fallbackChannel          chan enrichedLogMessage
+	fallbackChannel          chan model.EnrichedLog
 	fallbackCapacity         int
 	isConnected              bool
 	returns                  chan amqp.Return
@@ -43,7 +39,7 @@ func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fall
 	}
 	return &Publisher{
 		applicationConfiguration: applicationConfiguration,
-		fallbackChannel:          make(chan enrichedLogMessage, fallbackCapacity),
+		fallbackChannel:          make(chan model.EnrichedLog, fallbackCapacity),
 		fallbackCapacity:         fallbackCapacity,
 		isConnected:              false,
 		returns:                  make(chan amqp.Return, 1),
@@ -246,7 +242,7 @@ func (publisher *Publisher) drainFallback() error {
 
 func (publisher *Publisher) publishToFallback(enrichedLog model.EnrichedLog) error {
 	select {
-	case publisher.fallbackChannel <- enrichedLogMessage{EnrichedLog: enrichedLog}:
+	case publisher.fallbackChannel <- enrichedLog:
 		return nil
 	default:
 		slog.Error("in-memory fallback is full, cannot drop logs silently", "destination", enrichedLog.Destination, "batch_id", enrichedLog.BatchID)
@@ -255,7 +251,7 @@ func (publisher *Publisher) publishToFallback(enrichedLog model.EnrichedLog) err
 }
 
 // FallbackChannel returns the fallback channel.
-func (publisher *Publisher) FallbackChannel() <-chan enrichedLogMessage {
+func (publisher *Publisher) FallbackChannel() <-chan model.EnrichedLog {
 	return publisher.fallbackChannel
 }
 
@@ -263,7 +259,7 @@ func (publisher *Publisher) FallbackChannel() <-chan enrichedLogMessage {
 func (publisher *Publisher) GetFallbackMessage() (model.EnrichedLog, bool) {
 	select {
 	case message := <-publisher.fallbackChannel:
-		return message.EnrichedLog, true
+		return message, true
 	default:
 		return model.EnrichedLog{}, false
 	}
