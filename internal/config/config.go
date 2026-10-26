@@ -37,6 +37,7 @@ const (
 	environmentNameWriteRetryBackoffDelayList        = "RETRY_BACKOFFS"
 	environmentNameDeadLetterFilePath                = "DEAD_LETTER_PATH"
 	environmentNameDeadLetterMaximumFileSizeInBytes  = "DEAD_LETTER_MAX_BYTES"
+	environmentNameMetricsThroughputWindow           = "METRICS_THROUGHPUT_WINDOW"
 )
 
 const (
@@ -60,6 +61,7 @@ const (
 	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
+	defaultMetricsThroughputWindow          = time.Minute
 
 	RoutingKeyLogWrite = "log.write"
 
@@ -110,6 +112,7 @@ type ApplicationConfiguration struct {
 	WriteRetryBackoffDelays          []time.Duration
 	DeadLetterFilePath               string
 	DeadLetterMaximumFileSizeInBytes int
+	MetricsThroughputWindow          time.Duration
 }
 
 // Builds the application configuration from the merged process environment and configuration file, returning an error naming the first invalid setting.
@@ -290,6 +293,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, deadLetterMaximumFileSizeInBytesError
 	}
 	applicationConfiguration.DeadLetterMaximumFileSizeInBytes = deadLetterMaximumFileSizeInBytes
+
+	metricsThroughputWindow, metricsThroughputWindowError := parsePositiveDurationSetting(environmentVariables, environmentNameMetricsThroughputWindow, defaultMetricsThroughputWindow)
+	if metricsThroughputWindowError != nil {
+		return ApplicationConfiguration{}, metricsThroughputWindowError
+	}
+	applicationConfiguration.MetricsThroughputWindow = metricsThroughputWindow
 
 	validationError := validateConsumerBatchFitsBuffer(applicationConfiguration)
 	if validationError != nil {

@@ -113,6 +113,10 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("DeadLetterMaximumFileSizeInBytes = %d, want %d", applicationConfiguration.DeadLetterMaximumFileSizeInBytes, defaultDeadLetterMaximumFileSizeInBytes)
 	}
 
+	if applicationConfiguration.MetricsThroughputWindow != defaultMetricsThroughputWindow {
+		t.Errorf("MetricsThroughputWindow = %s, want %s", applicationConfiguration.MetricsThroughputWindow, defaultMetricsThroughputWindow)
+	}
+
 	expectedRetryBackoffDelays := []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
 
 	for retryBackoffDelayIndex, expectedRetryBackoffDelay := range expectedRetryBackoffDelays {
@@ -148,6 +152,7 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameWriteRetryBackoffDelayList] = "500ms, 2s, 4s, 8s"
 	environmentVariables[environmentNameDeadLetterFilePath] = "failed/letters.jsonl"
 	environmentVariables[environmentNameDeadLetterMaximumFileSizeInBytes] = "20971520"
+	environmentVariables[environmentNameMetricsThroughputWindow] = "30s"
 	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 
 	if configurationError != nil {
@@ -260,6 +265,10 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 
 	if applicationConfiguration.DeadLetterMaximumFileSizeInBytes != 20971520 {
 		t.Errorf("DeadLetterMaximumFileSizeInBytes = %d, want 20971520", applicationConfiguration.DeadLetterMaximumFileSizeInBytes)
+	}
+
+	if applicationConfiguration.MetricsThroughputWindow != 30*time.Second {
+		t.Errorf("MetricsThroughputWindow = %s, want 30s", applicationConfiguration.MetricsThroughputWindow)
 	}
 }
 
