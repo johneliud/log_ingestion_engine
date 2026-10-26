@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 135 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests.
+All 136 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests.
 
 ## Static checks before committing
 
@@ -38,13 +38,13 @@ These are the exact gates in `.github/workflows/ci.yml`.
 | `internal/enrich` | Enrichment fields, microsecond timestamp format, IP fallback |
 | `internal/handler` | HTTP handlers: log ingestion, metrics snapshot, root/home page, management-API backlog, dashboard page and assets |
 | `internal/ingest` | Log validation and client IP resolution |
-| `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting and the metrics counters |
+| `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting, the metrics counters, the graceful shutdown drain and the dead-letter recovery of the logs the pipeline could not process |
 | `internal/model` | Contract tests for log levels and destinations |
 | `internal/metrics` | Snapshot counters, error rate, throughput window, fallback backlog counter |
-| `internal/pipeline` | Batch consumer, bounded raw-logs queue, cancellation drain |
+| `internal/pipeline` | Batch consumer, bounded raw-logs queue, cancellation drain, recovery of the logs left in the queue |
 | `internal/queue` | Publisher, reconnect backoff, fallback activation |
 | `internal/queue/consumer` | RabbitMQ delivery handling, ack-after-store, requeue, fallback drain, consumer supervisor reconnect backoff |
-| `internal/ratelimit` | Per-IP limiter, idle cleanup, middleware rejection |
+| `internal/ratelimit` | Per-IP limiter, idle cleanup and its stop path, middleware rejection |
 | `internal/router` | Service routing rules, defaults, file loading |
 | `internal/storage` | Batch writer, SQLite store, dead-letter rotation, replay |
 

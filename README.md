@@ -97,6 +97,19 @@ Go dependencies resolve from `go.mod` automatically on the first build.
 
 On shutdown the HTTP server stops first, the raw logs still queued are enriched, routed and published, the fallback is drained into the batch writer, the remaining batches are flushed to SQLite and the dead-letter file is closed before the process exits. A broker that is unreachable at startup is not fatal. The service starts, logs to the fallback and reconnects in the background.
 
+## Graceful shutdown
+
+`SIGINT` or `SIGTERM` starts an ordered shutdown that runs inside `SHUTDOWN_GRACE_PERIOD` (default `30s`):
+
+1. The HTTP server stops accepting requests and waits for the in-flight ones.
+2. The pipeline workers stop taking new work and drain `raw_logs`: every accepted log is enriched, routed and published to RabbitMQ or to the in-memory fallback.
+3. The storage side stops: the consumers, the fallback processor, the publisher reconnect loop, the batch writer, the flush trigger and the rate limiter cleanup goroutine are cancelled and awaited.
+4. The batch writer flushes every destination buffer to SQLite, the dead-letter writer drains its queued entries into the file, and the SQLite databases and the broker connection are closed.
+
+Logs that are already in RabbitMQ stay in the broker queue when the consumers stop and are stored by the next start, so nothing is lost when the process exits mid-flight.
+
+If the grace period expires before the pipeline drains, the logs still waiting in `raw_logs` are enriched, routed and written to the dead-letter file instead of being dropped, and the shutdown reports the timeout.
+
 All settings come from environment variables with documented defaults in `configs/.env.example`; RabbitMQ credentials are required and the server fails fast with a readable error when a required value is missing or invalid including a malformed configuration file (a missing file is simply ignored).
 
 ## Client IP resolution
