@@ -115,7 +115,7 @@ func (publisher *Publisher) connect() error {
 		return channelError
 	}
 
-	if err := publisher.declareTopology(channel); err != nil {
+	if err := DeclareTopology(channel); err != nil {
 		channel.Close()
 		connection.Close()
 		publisher.markDisconnected()
@@ -156,8 +156,8 @@ func (publisher *Publisher) connect() error {
 	return nil
 }
 
-// Declares the exchanges, queues and bindings used by the publisher.
-func (publisher *Publisher) declareTopology(channel *amqp.Channel) error {
+// Declares the exchanges, queues and bindings used by the publisher and the consumers.
+func DeclareTopology(channel *amqp.Channel) error {
 	exchanges := []string{config.ExchangeService1Name, config.ExchangeService2Name, config.ExchangeService3Name}
 	queues := []string{config.QueueService1Name, config.QueueService2Name, config.QueueService3Name}
 

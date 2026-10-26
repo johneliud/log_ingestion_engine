@@ -87,6 +87,16 @@ func (supervisor *Supervisor) Start(applicationContext context.Context) <-chan s
 				continue
 			}
 
+			if topologyError := supervisor.declareTopology(connection); topologyError != nil {
+				slog.Warn("declaring the rabbitmq topology for consumption failed, retrying", "error", topologyError)
+				connection.Close()
+				if waitError := supervisor.waitForReconnectDelay(applicationContext, supervisor.reconnectDelayAt(reconnectAttemptIndex)); waitError != nil {
+					return
+				}
+				reconnectAttemptIndex++
+				continue
+			}
+
 			reconnectAttemptIndex = 0
 			slog.Info("connected to rabbitmq for consumption")
 			supervisor.consumeUntilDisconnected(applicationContext, connection)
@@ -95,9 +105,23 @@ func (supervisor *Supervisor) Start(applicationContext context.Context) <-chan s
 				return
 			}
 			slog.Warn("rabbitmq consumption connection lost, reconnecting")
+			if waitError := supervisor.waitForReconnectDelay(applicationContext, supervisor.reconnectDelayAt(reconnectAttemptIndex)); waitError != nil {
+				return
+			}
 		}
 	}()
 	return completed
+}
+
+// Declares the exchanges, queues and bindings the destination consumers read from.
+func (supervisor *Supervisor) declareTopology(connection *amqp.Connection) error {
+	channel, channelError := connection.Channel()
+	if channelError != nil {
+		return channelError
+	}
+	defer channel.Close()
+
+	return queue.DeclareTopology(channel)
 }
 
 // Runs the destination consumers on one connection until they all stop.
