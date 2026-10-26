@@ -19,6 +19,13 @@ type retryWaiter func(applicationContext context.Context, retryDelay time.Durati
 // Records a log that exhausted every storage retry.
 type deadLetterSink func(deadLetterEntry model.DeadLetterEntry) error
 
+// Counts the stored logs, failed writes and dead-lettered logs.
+type storageMetricsRecorder interface {
+	RecordQueueMessageStored()
+	RecordWriteFailure()
+	RecordDeadLetteredLog()
+}
+
 // Supplies the buffering, retry settings and storage side effect for a batch writer.
 type BatchWriterDependencies struct {
 	ApplicationContext  context.Context
@@ -28,6 +35,7 @@ type BatchWriterDependencies struct {
 	WaitForRetryDelay   retryWaiter
 	DeadLetterSink      deadLetterSink
 	CurrentTimeProvider func() time.Time
+	MetricsRecorder     storageMetricsRecorder
 }
 
 // Represents the buffered logs and in-flight flush state for one destination.
@@ -46,6 +54,7 @@ type BatchWriter struct {
 	waitForRetryDelay   retryWaiter
 	deadLetterSink      deadLetterSink
 	currentTimeProvider func() time.Time
+	metricsRecorder     storageMetricsRecorder
 	buffers             map[model.Destination]*destinationBuffer
 }
 
@@ -78,6 +87,7 @@ func NewBatchWriter(dependencies BatchWriterDependencies) *BatchWriter {
 		waitForRetryDelay:   waitForRetryDelay,
 		deadLetterSink:      dependencies.DeadLetterSink,
 		currentTimeProvider: currentTimeProvider,
+		metricsRecorder:     dependencies.MetricsRecorder,
 		buffers:             buffers,
 	}
 }
@@ -166,8 +176,10 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 	for retryIndex := 0; ; retryIndex++ {
 		storeError := batchWriter.storeBatch(destination, enrichedLogs)
 		if storeError == nil {
+			batchWriter.recordStoredMessages(len(enrichedLogs))
 			return nil
 		}
+		batchWriter.recordWriteFailure()
 
 		if retryIndex >= len(batchWriter.retryBackoffDelays) {
 			for logIndex := range enrichedLogs {
@@ -218,9 +230,37 @@ func (batchWriter *BatchWriter) deadLetterBatch(enrichedLogs []model.EnrichedLog
 			if deadLetterError == nil {
 				deadLetterError = submitError
 			}
+			continue
 		}
+		batchWriter.recordDeadLetteredLog()
 	}
 	return deadLetterError
+}
+
+// Counts the logs that reached durable storage.
+func (batchWriter *BatchWriter) recordStoredMessages(storedMessageCount int) {
+	if batchWriter.metricsRecorder == nil {
+		return
+	}
+	for storedMessageIndex := 0; storedMessageIndex < storedMessageCount; storedMessageIndex++ {
+		batchWriter.metricsRecorder.RecordQueueMessageStored()
+	}
+}
+
+// Counts one failed write attempt.
+func (batchWriter *BatchWriter) recordWriteFailure() {
+	if batchWriter.metricsRecorder == nil {
+		return
+	}
+	batchWriter.metricsRecorder.RecordWriteFailure()
+}
+
+// Counts one log that was written to the dead-letter file.
+func (batchWriter *BatchWriter) recordDeadLetteredLog() {
+	if batchWriter.metricsRecorder == nil {
+		return
+	}
+	batchWriter.metricsRecorder.RecordDeadLetteredLog()
 }
 
 // Waits for the retry delay unless the application context is cancelled first.
