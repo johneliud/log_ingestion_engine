@@ -100,3 +100,50 @@ An entry may have multiple field errors when more than one field fails validatio
 | `level`     | One of INFO, WARN, ERROR, DEBUG                | `level must be one of INFO, WARN, ERROR, DEBUG`           |
 | `message`   | Must not be empty                              | `message is required`                                      |
 | `message`   | At most 10,000 characters                      | `message must be at most 10000 characters`               |
+
+## GET /metrics
+
+Returns a snapshot of the service's runtime metrics as JSON. The endpoint never authenticates, never fails with a non-200 status for metric reasons, and refreshes `queue_backlog` on every request.
+
+### Responses
+
+| Status | Situation                  | Body shape                                  |
+|--------|----------------------------|---------------------------------------------|
+| 200    | `GET /metrics`             | `MetricsSnapshot`                           |
+| 200    | Any other method           | Plain text `log ingestion engine` from the catch-all root handler (`/` is registered for every unmatched path and method) |
+
+### Response shape
+
+#### MetricsSnapshot (200)
+
+```json
+{
+    "total_logs_received": 1284,
+    "logs_by_level": {"INFO": 900, "WARN": 300, "ERROR": 84},
+    "logs_by_service": {"claims": 700, "billing": 584},
+    "error_rate": 0.065,
+    "throughput": 42.5,
+    "queue_backlog": 17,
+    "rate_limited_requests": 3,
+    "dead_lettered_logs": 0,
+    "write_failures": 0
+}
+```
+
+| Field                   | Type                 | Meaning                                                       |
+|-------------------------|----------------------|---------------------------------------------------------------|
+| `total_logs_received`   | integer              | Total log entries accepted since process start                |
+| `logs_by_level`         | object of integers   | Accepted entries grouped by `INFO`/`WARN`/`ERROR`/`DEBUG`     |
+| `logs_by_service`       | object of integers   | Accepted entries grouped by `service` name                    |
+| `error_rate`            | number               | `ERROR` entries divided by total entries (0 when none)        |
+| `throughput`            | number               | Accepted entries per second over the configured window (`METRICS_THROUGHPUT_WINDOW`) |
+| `queue_backlog`         | integer              | Messages waiting across the three `queue_service*` queues     |
+| `rate_limited_requests` | integer              | Requests rejected or throttled by the rate limiter            |
+| `dead_lettered_logs`    | integer              | Entries routed to the dead-letter destination                 |
+| `write_failures`        | integer              | Storage write attempts that failed                            |
+
+### queue_backlog sourcing
+
+On each `GET /metrics` request the service queries the RabbitMQ management API (`GET {RABBITMQ_MGMT_URL}/api/queues`, basic auth, bounded by `METRICS_BACKLOG_TIMEOUT`) and sums the `messages` field across `queue_service1`, `queue_service2` and `queue_service3`, ignoring any other queue on the broker.
+
+When the management API URL is not configured, unreachable, or rejects the request, the service logs a warning and reports a local fallback counter instead: an in-process estimate defined as messages published minus messages stored (`RecordQueueMessagePublished` / `RecordQueueMessageStored`), floored at zero. The fallback value is intentionally not part of the snapshot; only `queue_backlog` carries the effective value.

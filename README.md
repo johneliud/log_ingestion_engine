@@ -125,6 +125,8 @@ Two values are derived at snapshot time rather than stored:
 
 All counters are in memory and reset when the process restarts.
 
+`GET /metrics` serves the full snapshot as JSON and refreshes `queue_backlog` on every request: the three `queue_service*` queues are summed from the RabbitMQ management API (`RABBITMQ_MGMT_URL/api/queues`, bounded by `METRICS_BACKLOG_TIMEOUT`, default `2s`). If the URL is unset or the API fails, a warning is logged and a local fallback counter — defined as messages published minus messages stored, floored at zero — is reported instead. The response shape is documented in [`docs/api.md`](docs/api.md).
+
 ## Tests
 
 ```bash
