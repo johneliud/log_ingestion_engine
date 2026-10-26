@@ -53,4 +53,10 @@ func TestRootEndpointHandler_ServesTheArchitectureHomePage(t *testing.T) {
 	if !strings.Contains(string(pageScript), `theme: "neutral"`) {
 		t.Errorf("architecture.js does not render the diagram with the light mermaid theme")
 	}
+	if !strings.Contains(string(pageScript), "useMaxWidth: false") {
+		t.Errorf("architecture.js does not keep the diagram at its intrinsic size")
+	}
+	if strings.Contains(string(pageScript), "replaceChildren(renderedDiagram.svg)") {
+		t.Errorf("architecture.js inserts the rendered SVG as text instead of markup")
+	}
 }
