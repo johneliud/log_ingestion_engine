@@ -131,6 +131,8 @@ All counters are in memory and reset when the process restarts.
 
 `GET /dashboard` shows total logs, logs per second, error rate, queue backlog and the top five services by volume as plain numbers, refreshed every five seconds by polling `GET /metrics`. Throughput and error-rate history are kept client-side in the page and drawn with Chart.js 4.6.1, vendored at `internal/dashboard/static/js/chart.umd.js` and embedded — the page never loads a CDN and renders fully offline.
 
+Typography is Space Grotesk, vendored as woff2 subsets under `internal/dashboard/static/fonts` together with its SIL Open Font License. It is the only font the pages use — sans-serif and monospace text alike — and no font is fetched from a CDN.
+
 Styling is Tailwind CSS compiled ahead of time. After editing `internal/dashboard/static/css/input.css`, the pages `internal/dashboard/index.html` or `internal/dashboard/root.html`, or `internal/dashboard/static/js/app.js`, regenerate and commit the stylesheet with:
 
 ```bash
