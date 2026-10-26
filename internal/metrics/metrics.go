@@ -75,3 +75,31 @@ func (metrics *Metrics) RecordLogsReceived(logs []model.LogEntry) {
 	metrics.throughputWindowCounts[currentSecond%int64(metrics.throughputWindowCount)] += uint64(len(logs))
 }
 
+// Records one request rejected by the rate limiter.
+func (metrics *Metrics) RecordRateLimitedRequest() {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	metrics.rateLimitedRequests++
+}
+
+// Records one log that exhausted every storage retry and was dead-lettered.
+func (metrics *Metrics) RecordDeadLetteredLog() {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	metrics.deadLetteredLogs++
+}
+
+// Records one failed durable write attempt.
+func (metrics *Metrics) RecordWriteFailure() {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	metrics.writeFailures++
+}
+
+// Updates the queue backlog count sourced from the RabbitMQ management API.
+func (metrics *Metrics) SetQueueBacklog(backlog int) {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	metrics.queueBacklog = backlog
+}
+
