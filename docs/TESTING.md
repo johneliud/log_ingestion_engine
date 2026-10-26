@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 136 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests.
+All 140 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests.
 
 ## Static checks before committing
 
@@ -38,11 +38,11 @@ These are the exact gates in `.github/workflows/ci.yml`.
 | `internal/enrich` | Enrichment fields, microsecond timestamp format, IP fallback |
 | `internal/handler` | HTTP handlers: log ingestion, metrics snapshot, root/home page, management-API backlog, dashboard page and assets |
 | `internal/ingest` | Log validation and client IP resolution |
-| `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting, the metrics counters, the graceful shutdown drain and the dead-letter recovery of the logs the pipeline could not process |
+| `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting, the metrics counters, the graceful shutdown drain, the wait for the running requests and the dead-letter recovery of the logs the pipeline could not process |
 | `internal/model` | Contract tests for log levels and destinations |
 | `internal/metrics` | Snapshot counters, error rate, throughput window, fallback backlog counter |
-| `internal/pipeline` | Batch consumer, bounded raw-logs queue, cancellation drain, recovery of the logs left in the queue |
-| `internal/queue` | Publisher, reconnect backoff, fallback activation |
+| `internal/pipeline` | Batch consumer, bounded raw-logs queue, cancellation drain, recovery of the logs left in the queue, dead-lettering of the logs that cannot be routed or published |
+| `internal/queue` | Publisher, reconnect backoff, fallback activation, rejection of the logs that arrive after the close |
 | `internal/queue/consumer` | RabbitMQ delivery handling, ack-after-store, requeue, fallback drain, consumer supervisor reconnect backoff |
 | `internal/ratelimit` | Per-IP limiter, idle cleanup and its stop path, middleware rejection |
 | `internal/router` | Service routing rules, defaults, file loading |

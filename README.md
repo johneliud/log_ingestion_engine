@@ -99,16 +99,20 @@ On shutdown the HTTP server stops first, the raw logs still queued are enriched,
 
 ## Graceful shutdown
 
-`SIGINT` or `SIGTERM` starts an ordered shutdown that runs inside `SHUTDOWN_GRACE_PERIOD` (default `30s`):
+`SIGINT` or `SIGTERM` starts an ordered shutdown. Every phase shares the single deadline of `SHUTDOWN_GRACE_PERIOD` (default `30s`), so the whole shutdown never takes longer than the configured period:
 
-1. The HTTP server stops accepting requests and waits for the in-flight ones.
-2. The pipeline workers stop taking new work and drain `raw_logs`: every accepted log is enriched, routed and published to RabbitMQ or to the in-memory fallback.
-3. The storage side stops: the consumers, the fallback processor, the publisher reconnect loop, the batch writer, the flush trigger and the rate limiter cleanup goroutine are cancelled and awaited.
-4. The batch writer flushes every destination buffer to SQLite, the dead-letter writer drains its queued entries into the file, and the SQLite databases and the broker connection are closed.
+1. The HTTP server stops accepting requests and waits for the in-flight ones. The connections that outlast the deadline are closed.
+2. The shutdown waits for the requests that are still running, so no handler can push into `raw_logs` after the drain.
+3. The pipeline workers stop taking new work and drain `raw_logs`: every accepted log is enriched, routed and published to RabbitMQ or to the in-memory fallback.
+4. The publisher stops accepting logs and the logs still waiting in `raw_logs` are enriched, routed and written to the dead-letter file.
+5. The storage side stops: the consumers, the fallback processor, the publisher reconnect loop, the batch writer, the flush trigger and the rate limiter cleanup goroutine are cancelled and awaited.
+6. The batch writer flushes every destination buffer to SQLite, the SQLite databases are closed and the dead-letter writer drains its queued entries into the file last, so late failures are still recorded.
 
 Logs that are already in RabbitMQ stay in the broker queue when the consumers stop and are stored by the next start, so nothing is lost when the process exits mid-flight.
 
-If the grace period expires before the pipeline drains, the logs still waiting in `raw_logs` are enriched, routed and written to the dead-letter file instead of being dropped, and the shutdown reports the timeout.
+A log that cannot be routed or published is written to the dead-letter file instead of being dropped, which also covers the shutdown window where the publisher is already closed.
+
+If the grace period expires before the pipeline drains, the logs still waiting in `raw_logs` are dead-lettered and the shutdown reports the timeout.
 
 All settings come from environment variables with documented defaults in `configs/.env.example`; RabbitMQ credentials are required and the server fails fast with a readable error when a required value is missing or invalid including a malformed configuration file (a missing file is simply ignored).
 
@@ -122,7 +126,7 @@ Trusted proxies are configured with `TRUSTED_PROXIES` as a comma-separated list 
 
 ## Dead letters and replay
 
-After the configured write retries are exhausted (`RETRY_BACKOFFS`, default `1s,5s,10s`), the affected logs are appended to `DEAD_LETTER_PATH` (default `logs-failed.json`) as newline-delimited JSON containing the original log, the error message and the failure timestamp.
+After the configured write retries are exhausted (`RETRY_BACKOFFS`, default `1s,5s,10s`), the affected logs are appended to `DEAD_LETTER_PATH` (default `logs-failed.json`) as newline-delimited JSON containing the original log, the error message and the failure timestamp. Logs that cannot be routed or published are written to the same file with the failure that stopped them.
 
 A single writer goroutine serializes file I/O. When adding an entry would exceed `DEAD_LETTER_MAX_BYTES` (default 10 MB), the file is rotated to `logs-failed.1.json`, `logs-failed.2.json`, and so on.
 
@@ -139,7 +143,7 @@ Replay stops at the first unreadable line so a corrupt file is never silently sk
 
 When a publish fails or the broker connection drops, the publisher logs a warning, marks itself disconnected and writes subsequent logs to a bounded in-memory fallback instead of blocking ingestion. The publisher retries the connection automatically using `RABBITMQ_RECONNECT_BACKOFFS` (default `1s,5s,10s,30s`, reusing the last delay after the list is exhausted) and resumes publishing once the broker returns.
 
-Fallback logs are not re-published after reconnecting. They stay in the fallback channel and the fallback consumer stores them directly in SQLite while new logs go to RabbitMQ, so each accepted log follows exactly one path: broker or fallback. If the fallback fills before the broker returns, `Publish` reports and logs an error rather than dropping the log silently; during a sustained outage with more than the fallback capacity in flight, that is the only documented loss point.
+Fallback logs are not re-published after reconnecting. They stay in the fallback channel and the fallback consumer stores them directly in SQLite while new logs go to RabbitMQ, so each accepted log follows exactly one path: broker or fallback. If the fallback fills before the broker returns, `Publish` reports the error and the log is written to the dead-letter file instead of being dropped silently.
 
 ## Metrics
 
