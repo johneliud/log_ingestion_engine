@@ -34,6 +34,19 @@ func (rawLogsQueue *RawLogsQueue) RawLogsChannel() <-chan model.RawLog {
 	return rawLogsQueue.channel
 }
 
+// Removes and returns the logs still waiting in the queue so they are not lost.
+func (rawLogsQueue *RawLogsQueue) DrainRemainingLogs() []model.RawLog {
+	undrainedLogs := make([]model.RawLog, 0, len(rawLogsQueue.channel))
+	for {
+		select {
+		case rawLog := <-rawLogsQueue.channel:
+			undrainedLogs = append(undrainedLogs, rawLog)
+		default:
+			return undrainedLogs
+		}
+	}
+}
+
 // Pushes a batch of raw logs into the queue. If the whole batch cannot fit without blocking beyond the timeout, nothing is sent and the function reports failure.
 func (rawLogsQueue *RawLogsQueue) PushBatch(rawLogs []model.RawLog) error {
 	if len(rawLogs) == 0 {

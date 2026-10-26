@@ -45,6 +45,26 @@ func TestRawLogsQueue_PushBatchDrains(t *testing.T) {
 	}
 }
 
+func TestRawLogsQueue_DrainRemainingLogsRemovesTheWaitingLogs(t *testing.T) {
+	t.Parallel()
+	rawLogsQueue := NewRawLogsQueue(10, 100*time.Millisecond)
+	batch := []model.RawLog{{BatchID: "first"}, {BatchID: "second"}}
+	if err := rawLogsQueue.PushBatch(batch); err != nil {
+		t.Fatalf("batch should fit")
+	}
+
+	undrainedLogs := rawLogsQueue.DrainRemainingLogs()
+	if len(undrainedLogs) != 2 {
+		t.Fatalf("undrained log count = %d, want 2", len(undrainedLogs))
+	}
+	if undrainedLogs[0].BatchID != "first" || undrainedLogs[1].BatchID != "second" {
+		t.Errorf("undrained logs = %+v, want the queued logs in order", undrainedLogs)
+	}
+	if remainingLogs := rawLogsQueue.DrainRemainingLogs(); len(remainingLogs) != 0 {
+		t.Errorf("undrained log count after the drain = %d, want 0", len(remainingLogs))
+	}
+}
+
 func TestRawLogsQueue_FailedReservationEnqueuesNothing(t *testing.T) {
 	t.Parallel()
 	queue := NewRawLogsQueue(3, 20*time.Millisecond)
