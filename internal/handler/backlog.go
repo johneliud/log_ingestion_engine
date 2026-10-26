@@ -23,6 +23,7 @@ const maximumManagementResponseBytes = 4 << 20
 // Represents one queue as reported by the RabbitMQ management API.
 type managementQueueEntry struct {
 	Name     string `json:"name"`
+	Vhost    string `json:"vhost"`
 	Messages int    `json:"messages"`
 }
 
@@ -31,6 +32,7 @@ type queueBacklogFetcher struct {
 	managementAPIURL string
 	username         string
 	password         string
+	virtualHost      string
 	queueNames       []string
 	requestTimeout   time.Duration
 	httpClient       *http.Client
@@ -38,10 +40,15 @@ type queueBacklogFetcher struct {
 
 // Returns a fetcher for the configured management API, credentials and pipeline queues.
 func newQueueBacklogFetcher(applicationConfiguration config.ApplicationConfiguration) *queueBacklogFetcher {
+	virtualHost := applicationConfiguration.RabbitMQVirtualHost
+	if virtualHost == "" {
+		virtualHost = config.DefaultRabbitMQVirtualHost
+	}
 	return &queueBacklogFetcher{
 		managementAPIURL: applicationConfiguration.RabbitMQManagementURL,
 		username:         applicationConfiguration.RabbitMQUsername,
 		password:         applicationConfiguration.RabbitMQPassword,
+		virtualHost:      virtualHost,
 		queueNames:       []string{config.QueueService1Name, config.QueueService2Name, config.QueueService3Name},
 		requestTimeout:   applicationConfiguration.MetricsBacklogTimeout,
 		httpClient:       &http.Client{},
@@ -96,10 +103,13 @@ func (queueBacklogFetcher *queueBacklogFetcher) fetchQueueBacklog(applicationCon
 	return queueBacklogFetcher.sumPipelineQueueMessages(managementQueues), nil
 }
 
-// Returns the total messages across the pipeline queues, ignoring every other queue on the broker.
+// Returns the total messages across the pipeline queues of the configured virtual host, ignoring every other queue.
 func (queueBacklogFetcher *queueBacklogFetcher) sumPipelineQueueMessages(managementQueues []managementQueueEntry) int {
 	totalPipelineMessages := 0
 	for _, managementQueue := range managementQueues {
+		if managementQueue.Vhost != queueBacklogFetcher.virtualHost {
+			continue
+		}
 		if slices.Contains(queueBacklogFetcher.queueNames, managementQueue.Name) {
 			totalPipelineMessages += managementQueue.Messages
 		}

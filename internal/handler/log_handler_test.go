@@ -347,6 +347,22 @@ func TestNewLogIngestionHandler_CountsOnlyTheAcceptedEntriesInTheMetricsRecorder
 	}
 }
 
+func TestNewLogIngestionHandler_CountsAcceptedEntriesWithoutARawLogPusher(t *testing.T) {
+	t.Parallel()
+	recordingRecorder := &recordingIngestionMetricsRecorder{}
+	request := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(`[`+validEntryJSON+`,{}]`))
+	request.Header.Set("Content-Type", "application/json")
+	responseRecorder := httptest.NewRecorder()
+	NewLogIngestionHandler(testMaximumBodySizeInBytes, WithIngestionMetricsRecorder(recordingRecorder)).ServeHTTP(responseRecorder, request)
+
+	if responseRecorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", responseRecorder.Code, http.StatusAccepted)
+	}
+	if recordingRecorder.recordedEntryCount() != 1 {
+		t.Errorf("recorded entry count = %d, want 1", recordingRecorder.recordedEntryCount())
+	}
+}
+
 func TestNewLogIngestionHandler_PartialBatchReturnsAcceptedWithRejectedEntries(t *testing.T) {
 	t.Parallel()
 	requestBody := fmt.Sprintf(

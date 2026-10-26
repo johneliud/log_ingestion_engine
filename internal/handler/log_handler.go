@@ -106,9 +106,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 				WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
 				return
 			}
-			if handlerConfiguration.metricsRecorder != nil {
-				handlerConfiguration.metricsRecorder.RecordLogsReceived(validEntries)
-			}
+			handlerConfiguration.recordLogsReceived(validEntries)
 			writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
 				Status:   "accepted",
 				BatchID:  batchID,
@@ -117,6 +115,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 			return
 		}
 
+		handlerConfiguration.recordLogsReceived(validEntries)
 		batchID := uuid.NewString()
 		writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
 			Status:   "accepted",
@@ -132,6 +131,14 @@ type logIngestionHandlerConfiguration struct {
 	currentTimeProvider    func() time.Time
 	trustedProxies         []string
 	metricsRecorder        ingestionMetricsRecorder
+}
+
+// Counts the accepted log entries when a metrics recorder is configured.
+func (configuration *logIngestionHandlerConfiguration) recordLogsReceived(validEntries []model.LogEntry) {
+	if configuration.metricsRecorder == nil || len(validEntries) == 0 {
+		return
+	}
+	configuration.metricsRecorder.RecordLogsReceived(validEntries)
 }
 
 // LogIngestionHandlerOption configures the log ingestion handler.

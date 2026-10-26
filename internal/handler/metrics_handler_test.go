@@ -73,10 +73,11 @@ func TestMetricsHandler_ReportsBacklogFromTheManagementAPI(t *testing.T) {
 		}
 		responseWriter.Header().Set("Content-Type", "application/json")
 		_, _ = responseWriter.Write([]byte(`[
-			{"name":"queue_service1","messages":7},
-			{"name":"queue_service2","messages":5},
-			{"name":"queue_service3","messages":3},
-			{"name":"someone_elses_queue","messages":100}
+			{"name":"queue_service1","vhost":"/","messages":7},
+			{"name":"queue_service2","vhost":"/","messages":5},
+			{"name":"queue_service3","vhost":"/","messages":3},
+			{"name":"someone_elses_queue","vhost":"/","messages":100},
+			{"name":"queue_service1","vhost":"/other","messages":50}
 		]`))
 	}))
 	defer managementAPIServer.Close()
