@@ -33,9 +33,9 @@ func TestRootEndpointHandler_ServesTheArchitectureHomePage(t *testing.T) {
 		"/dashboard/css/styles.css",
 		"bg-white",
 		"text-slate-900",
-		"Package responsibilities",
-		"internal/config",
-		"internal/metrics",
+		"max-w-screen-2xl",
+		"What this project is about",
+		"Design decisions",
 	}
 	for _, requiredContent := range requiredPageContent {
 		if !strings.Contains(pageBody, requiredContent) {
