@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 129 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests.
+All 135 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests.
 
 ## Static checks before committing
 
@@ -80,8 +80,6 @@ go test ./... -count=1 -race
 
 ## Test conventions
 
-Follow the rules in `AGENT.md` section 9:
-
 - Table-driven tests with case names that read as sentences.
 - Test names use the `TestFunctionName_Behaviour` pattern.
 - Fakes are plain structs or functions matching the seam type; no mocking libraries.
@@ -94,9 +92,9 @@ Follow the rules in `AGENT.md` section 9:
 `.github/workflows/ci.yml` runs on every push and pull request to `main`:
 
 1. Checkout and Go 1.26.3 setup.
-2. `gofmt -l .` — fails if any file is unformatted.
-3. `go vet ./...` — fails on vet warnings.
-4. `go test ./... -race` — fails on any test failure or data race.
+2. `gofmt -l .` fails if any file is unformatted.
+3. `go vet ./...` fails on vet warnings.
+4. `go test ./... -race` fails on any test failure or data race.
 
 ## Docker broker for manual integration
 
