@@ -114,6 +114,17 @@ When a publish fails or the broker connection drops, the publisher logs a warnin
 
 Fallback logs are not re-published after reconnecting. They stay in the fallback channel and the fallback consumer stores them directly in SQLite while new logs go to RabbitMQ, so each accepted log follows exactly one path: broker or fallback. If the fallback fills before the broker returns, `Publish` reports and logs an error rather than dropping the log silently; during a sustained outage with more than the fallback capacity in flight, that is the only documented loss point.
 
+## Metrics
+
+The `internal/metrics` module is the single source of truth for every counter. It tracks total logs received, logs by level, logs by service, rate-limited requests, dead-lettered logs, write failures and queue backlog. A snapshot is returned by `Snapshot()` and used by every consumer of metrics; counter updates on the ingestion path stay cheap.
+
+Two values are derived at snapshot time rather than stored:
+
+- **`error_rate`**: the number of ERROR-level logs divided by the total number of logs received since the process started.
+- **`throughput`**: the number of logs received in the last `METRICS_THROUGHPUT_WINDOW` seconds (default `1m`) divided by the window length in seconds. Logs older than the window are excluded from the throughput calculation but still count toward the cumulative total.
+
+All counters are in memory and reset when the process restarts.
+
 ## Tests
 
 ```bash
@@ -121,3 +132,5 @@ go test ./... -race
 go vet ./...
 gofmt -l .
 ```
+
+Full instructions, package-by-package coverage and CI details are in [`docs/TESTING.md`](docs/TESTING.md).
