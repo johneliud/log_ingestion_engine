@@ -45,12 +45,13 @@ func logConfigurationSummary(applicationConfiguration config.ApplicationConfigur
 	)
 }
 
-// Builds the request router with the ingestion, metrics, dashboard and home page routes wired.
+// Builds the request router with the ingestion, metrics page, metrics snapshot, dashboard and home page routes wired.
 func buildRequestRouter(applicationConfiguration config.ApplicationConfiguration) *http.ServeMux {
 	requestRouter := http.NewServeMux()
 	requestRouter.HandleFunc("POST /logs", handler.NewLogIngestionHandler(applicationConfiguration.MaximumBodySizeInBytes))
 	metricsRegistry := metrics.NewMetrics(applicationConfiguration.MetricsThroughputWindow, nil)
-	requestRouter.HandleFunc("GET /metrics", handler.NewMetricsHandler(metricsRegistry, applicationConfiguration))
+	requestRouter.HandleFunc("GET /metrics", handler.MetricsPageEndpointHandler())
+	requestRouter.HandleFunc("GET /metrics.json", handler.NewMetricsHandler(metricsRegistry, applicationConfiguration))
 	dashboardHandler := handler.NewDashboardHandler()
 	requestRouter.HandleFunc("GET /dashboard", dashboardHandler)
 	requestRouter.HandleFunc("GET /dashboard/", dashboardHandler)
