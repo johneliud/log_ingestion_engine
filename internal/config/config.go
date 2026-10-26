@@ -27,6 +27,7 @@ const (
 	environmentNameRabbitMQUsername                  = "RABBITMQ_USER"
 	environmentNameRabbitMQPassword                  = "RABBITMQ_PASS"
 	environmentNameRabbitMQManagementURL             = "RABBITMQ_MGMT_URL"
+	environmentNameRabbitMQVirtualHost               = "RABBITMQ_VHOST"
 	environmentNameRabbitMQUseTLS                    = "RABBITMQ_USE_TLS"
 	environmentNamePublishTimeout                    = "PUBLISH_TIMEOUT"
 	environmentNameRabbitMQReconnectBackoffDelayList = "RABBITMQ_RECONNECT_BACKOFFS"
@@ -44,18 +45,20 @@ const (
 )
 
 const (
-	defaultHTTPPort                         = 8080
-	defaultRateLimitPerSecond               = 1000
-	defaultRateLimitCleanupInterval         = time.Minute
-	defaultRawLogsBufferSize                = 10000
-	defaultConsumerBatchSize                = 50
-	defaultChannelSendTimeout               = 100 * time.Millisecond
-	defaultMaximumBodySizeInBytes           = 1048576
-	defaultApplicationEnvironment           = "production"
-	defaultRoutingConfigurationFilePath     = "configs/routing.json"
-	service1Destination                     = "service1"
-	defaultPublishTimeout                   = 5 * time.Second
-	defaultRabbitMQUseTLS                   = false
+	defaultHTTPPort                     = 8080
+	defaultRateLimitPerSecond           = 1000
+	defaultRateLimitCleanupInterval     = time.Minute
+	defaultRawLogsBufferSize            = 10000
+	defaultConsumerBatchSize            = 50
+	defaultChannelSendTimeout           = 100 * time.Millisecond
+	defaultMaximumBodySizeInBytes       = 1048576
+	defaultApplicationEnvironment       = "production"
+	defaultRoutingConfigurationFilePath = "configs/routing.json"
+	service1Destination                 = "service1"
+	defaultPublishTimeout               = 5 * time.Second
+	defaultRabbitMQUseTLS               = false
+	// DefaultRabbitMQVirtualHost is the virtual host used when none is configured.
+	DefaultRabbitMQVirtualHost              = "/"
 	defaultPipelineWorkerCount              = 4
 	defaultWriteBatchSize                   = 100
 	defaultWriteFlushInterval               = time.Second
@@ -106,6 +109,7 @@ type ApplicationConfiguration struct {
 	RabbitMQUsername                 string
 	RabbitMQPassword                 string
 	RabbitMQManagementURL            string
+	RabbitMQVirtualHost              string
 	RabbitMQUseTLS                   bool
 	PublishTimeout                   time.Duration
 	RabbitMQReconnectBackoffDelays   []time.Duration
@@ -239,6 +243,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, rabbitMQManagementURLError
 	}
 	applicationConfiguration.RabbitMQManagementURL = rabbitMQManagementURL
+
+	rabbitMQVirtualHost, rabbitMQVirtualHostError := parseStringSetting(environmentVariables, environmentNameRabbitMQVirtualHost, DefaultRabbitMQVirtualHost)
+	if rabbitMQVirtualHostError != nil {
+		return ApplicationConfiguration{}, rabbitMQVirtualHostError
+	}
+	applicationConfiguration.RabbitMQVirtualHost = rabbitMQVirtualHost
 
 	rabbitMQUseTLS, rabbitMQUseTLSError := parseBooleanSetting(environmentVariables, environmentNameRabbitMQUseTLS, defaultRabbitMQUseTLS)
 	if rabbitMQUseTLSError != nil {

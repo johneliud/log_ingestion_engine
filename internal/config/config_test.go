@@ -73,6 +73,10 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("TrustedProxies = %v, want no entries", applicationConfiguration.TrustedProxies)
 	}
 
+	if applicationConfiguration.RabbitMQVirtualHost != DefaultRabbitMQVirtualHost {
+		t.Errorf("RabbitMQVirtualHost = %q, want %q", applicationConfiguration.RabbitMQVirtualHost, DefaultRabbitMQVirtualHost)
+	}
+
 	if applicationConfiguration.PublishTimeout != defaultPublishTimeout {
 		t.Errorf("PublishTimeout = %s, want %s", applicationConfiguration.PublishTimeout, defaultPublishTimeout)
 	}
@@ -456,6 +460,20 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesTrustedProxyPrefixes(t
 		if applicationConfiguration.TrustedProxies[trustedProxyIndex] != expectedTrustedProxy {
 			t.Errorf("TrustedProxies[%d] = %q, want %q", trustedProxyIndex, applicationConfiguration.TrustedProxies[trustedProxyIndex], expectedTrustedProxy)
 		}
+	}
+}
+
+func TestNewApplicationConfigurationFromEnvironment_ParsesTheConfiguredRabbitMQVirtualHost(t *testing.T) {
+	t.Parallel()
+	environmentVariables := aValidMinimalEnvironment(t)
+	environmentVariables[environmentNameRabbitMQVirtualHost] = "log-engine"
+	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
+	if configurationError != nil {
+		t.Fatalf("expected the virtual host to be valid, got error: %v", configurationError)
+	}
+
+	if applicationConfiguration.RabbitMQVirtualHost != "log-engine" {
+		t.Errorf("RabbitMQVirtualHost = %q, want %q", applicationConfiguration.RabbitMQVirtualHost, "log-engine")
 	}
 }
 
