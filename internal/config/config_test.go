@@ -117,6 +117,10 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("MetricsThroughputWindow = %s, want %s", applicationConfiguration.MetricsThroughputWindow, defaultMetricsThroughputWindow)
 	}
 
+	if applicationConfiguration.MetricsBacklogTimeout != defaultMetricsBacklogTimeout {
+		t.Errorf("MetricsBacklogTimeout = %s, want %s", applicationConfiguration.MetricsBacklogTimeout, defaultMetricsBacklogTimeout)
+	}
+
 	expectedRetryBackoffDelays := []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
 
 	for retryBackoffDelayIndex, expectedRetryBackoffDelay := range expectedRetryBackoffDelays {
@@ -153,6 +157,7 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameDeadLetterFilePath] = "failed/letters.jsonl"
 	environmentVariables[environmentNameDeadLetterMaximumFileSizeInBytes] = "20971520"
 	environmentVariables[environmentNameMetricsThroughputWindow] = "30s"
+	environmentVariables[environmentNameMetricsBacklogTimeout] = "750ms"
 	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 
 	if configurationError != nil {
@@ -269,6 +274,10 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 
 	if applicationConfiguration.MetricsThroughputWindow != 30*time.Second {
 		t.Errorf("MetricsThroughputWindow = %s, want 30s", applicationConfiguration.MetricsThroughputWindow)
+	}
+
+	if applicationConfiguration.MetricsBacklogTimeout != 750*time.Millisecond {
+		t.Errorf("MetricsBacklogTimeout = %s, want 750ms", applicationConfiguration.MetricsBacklogTimeout)
 	}
 }
 
