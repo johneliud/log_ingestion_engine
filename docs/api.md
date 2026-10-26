@@ -153,9 +153,9 @@ Returns a snapshot of the service's runtime metrics as JSON. The endpoint never 
 
 ### queue_backlog sourcing
 
-On each `GET /metrics.json` request the service queries the RabbitMQ management API (`GET {RABBITMQ_MGMT_URL}/api/queues`, basic auth, bounded by `METRICS_BACKLOG_TIMEOUT`) and sums the `messages` field across `queue_service1`, `queue_service2` and `queue_service3`, ignoring any other queue on the broker.
+On each `GET /metrics.json` request the service queries the RabbitMQ management API (`GET {RABBITMQ_MGMT_URL}/api/queues`, basic auth, bounded by `METRICS_BACKLOG_TIMEOUT`) and sums the `messages` field across `queue_service1`, `queue_service2` and `queue_service3` inside the configured virtual host (`RABBITMQ_VHOST`, default `/`), ignoring any other queue on the broker and any same-named queue in another virtual host.
 
-When the management API URL is not configured, unreachable, or rejects the request, the service logs a warning and reports a local fallback counter instead: an in-process estimate defined as messages published minus messages stored (`RecordQueueMessagePublished` / `RecordQueueMessageStored`), floored at zero. The fallback value is intentionally not part of the snapshot; only `queue_backlog` carries the effective value.
+When the management API URL is not configured, unreachable, or rejects the request, the service logs a warning and reports a local fallback counter instead: an in-process estimate defined as messages published minus messages stored or released (`RecordQueueMessagePublished` / `RecordQueueMessageStored` / `RecordQueueMessageReleased`), floored at zero. The fallback value is intentionally not part of the snapshot; only `queue_backlog` carries the effective value.
 
 ## Other endpoints
 

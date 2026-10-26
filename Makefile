@@ -1,5 +1,5 @@
 TAILWIND_VERSION := v4.3.3
-TAILWIND_BINARY := bin/tailwindcss-linux-x64
+TAILWIND_BINARY := bin/tailwindcss-$(TAILWIND_VERSION)-linux-x64
 
 # Regenerates the committed dashboard stylesheet.
 dashboard-css: $(TAILWIND_BINARY)
