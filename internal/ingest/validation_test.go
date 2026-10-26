@@ -286,7 +286,7 @@ func TestValidateLogEntry_ReturnsMultipleFieldErrorsForOneEntry(t *testing.T) {
 func TestValidateLogEntries_AcceptsAllValidEntries(t *testing.T) {
 	t.Parallel()
 	entries := []model.LogEntry{aValidLogEntry(), aValidLogEntry(), aValidLogEntry()}
-	validEntries, rejectedEntries := validateLogEntries(entries)
+	validEntries, rejectedEntries := ValidateLogEntries(entries)
 
 	if len(validEntries) != 3 {
 		t.Errorf("valid entries = %d, want 3", len(validEntries))
@@ -303,7 +303,7 @@ func TestValidateLogEntries_PartialBatchPreservesValidAndRejectedWithCorrectIndi
 	invalidEntry.Level = "TRACE"
 
 	entries := []model.LogEntry{aValidLogEntry(), invalidEntry, aValidLogEntry()}
-	validEntries, rejectedEntries := validateLogEntries(entries)
+	validEntries, rejectedEntries := ValidateLogEntries(entries)
 
 	if len(validEntries) != 2 {
 		t.Errorf("valid entries = %d, want 2", len(validEntries))
@@ -332,7 +332,7 @@ func TestValidateLogEntries_AllInvalidReturnsZeroValidAndAllRejected(t *testing.
 	invalidEntry.Level = "TRACE"
 
 	entries := []model.LogEntry{invalidEntry, invalidEntry}
-	validEntries, rejectedEntries := validateLogEntries(entries)
+	validEntries, rejectedEntries := ValidateLogEntries(entries)
 
 	if len(validEntries) != 0 {
 		t.Errorf("valid entries = %d, want 0", len(validEntries))
