@@ -22,6 +22,7 @@ type deadLetterSink func(deadLetterEntry model.DeadLetterEntry) error
 // Counts the stored logs, failed writes and dead-lettered logs.
 type storageMetricsRecorder interface {
 	RecordQueueMessageStored()
+	RecordQueueMessageReleased()
 	RecordWriteFailure()
 	RecordDeadLetteredLog()
 }
@@ -255,12 +256,13 @@ func (batchWriter *BatchWriter) recordWriteFailure() {
 	batchWriter.metricsRecorder.RecordWriteFailure()
 }
 
-// Counts one log that was written to the dead-letter file.
+// Counts one log that was written to the dead-letter file and releases its in-flight backlog slot.
 func (batchWriter *BatchWriter) recordDeadLetteredLog() {
 	if batchWriter.metricsRecorder == nil {
 		return
 	}
 	batchWriter.metricsRecorder.RecordDeadLetteredLog()
+	batchWriter.metricsRecorder.RecordQueueMessageReleased()
 }
 
 // Waits for the retry delay unless the application context is cancelled first.
