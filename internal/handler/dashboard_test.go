@@ -135,7 +135,7 @@ func TestDashboardHandler_EveryPageClassIsInTheGeneratedStylesheet(t *testing.T)
 
 	classAttributePattern := regexp.MustCompile(`class="([^"]*)"`)
 	checkedClassCount := 0
-	for _, pageAssetName := range []string{"index.html", "root.html"} {
+	for _, pageAssetName := range []string{"index.html", "root.html", "metrics.html"} {
 		pageHTML, pageError := dashboard.Assets.ReadFile(pageAssetName)
 		if pageError != nil {
 			t.Fatalf("reading the embedded %s: %v", pageAssetName, pageError)
@@ -158,7 +158,7 @@ func TestDashboardHandler_EveryPageClassIsInTheGeneratedStylesheet(t *testing.T)
 func TestDashboardAssets_ReferenceNoExternalResources(t *testing.T) {
 	t.Parallel()
 
-	for _, assetName := range []string{"index.html", "root.html", "static/js/app.js", "static/js/architecture.js", "static/css/input.css"} {
+	for _, assetName := range []string{"index.html", "root.html", "metrics.html", "static/js/app.js", "static/js/architecture.js", "static/js/metrics.js", "static/css/input.css"} {
 		content, readError := dashboard.Assets.ReadFile(assetName)
 		if readError != nil {
 			t.Fatalf("reading the embedded %s: %v", assetName, readError)
@@ -172,8 +172,8 @@ func TestDashboardAssets_ReferenceNoExternalResources(t *testing.T) {
 	if scriptError != nil {
 		t.Fatalf("reading the embedded app.js: %v", scriptError)
 	}
-	if !strings.Contains(string(pageScript), `"/metrics"`) {
-		t.Errorf("app.js does not poll the local /metrics endpoint")
+	if !strings.Contains(string(pageScript), `"/metrics.json"`) {
+		t.Errorf("app.js does not poll the local /metrics.json endpoint")
 	}
 }
 
