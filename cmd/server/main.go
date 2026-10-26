@@ -25,10 +25,13 @@ import (
 	"github.com/johneliud/log_ingestion_engine/internal/storage"
 )
 
-const (
-	shutdownGracePeriod           = 5 * time.Second
-	minimumRateLimiterIdleTimeout = time.Second
-)
+const minimumRateLimiterIdleTimeout = time.Second
+
+// Names one background component and the channel that reports when it stops.
+type backgroundWork struct {
+	name       string
+	completion <-chan struct{}
+}
 
 // Holds the wired request router and the background work the application owns.
 type serverApplication struct {
@@ -36,12 +39,18 @@ type serverApplication struct {
 	cancelPipelineWork    context.CancelFunc
 	cancelStorageWork     context.CancelFunc
 	pipelineCompletion    <-chan struct{}
-	backgroundCompletions []<-chan struct{}
+	backgroundCompletions []backgroundWork
 	deadLetterCompletion  <-chan struct{}
 	batchWriter           *storage.BatchWriter
 	deadLetterWriter      *storage.DeadLetterWriter
 	sqliteLogStore        *storage.SQLiteLogStore
 	publisher             *queue.Publisher
+	rawLogsQueue          *pipeline.RawLogsQueue
+	logEnricher           *enrich.LogEnricher
+	serviceRouter         *router.ServiceRouter
+	defaultDestination    model.Destination
+	publishTimeout        time.Duration
+	currentTimeProvider   func() time.Time
 	shutdownOnce          sync.Once
 	shutdownError         error
 }
@@ -65,7 +74,7 @@ func main() {
 	}
 
 	serveError := runHTTPServerUntilContextIsCancelled(applicationContext, applicationConfiguration, serverApplication.requestRouter)
-	shutdownError := serverApplication.shutdownBackgroundWork(shutdownGracePeriod)
+	shutdownError := serverApplication.shutdownBackgroundWork(applicationConfiguration.ShutdownGracePeriod)
 	if serveError != nil {
 		slog.Error("http server stopped unexpectedly", "server_error", serveError)
 		os.Exit(1)
@@ -161,15 +170,15 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 	flushTrigger, flushTriggerCompletion := startFlushTrigger(storageContext, applicationConfiguration.WriteFlushInterval)
 
 	pipelineCompletion := batchConsumer.Start(pipelineContext)
-	backgroundCompletions := []<-chan struct{}{
-		publisher.RunReconnectLoop(storageContext),
-		batchWriter.Run(storageContext, flushTrigger),
-		fallbackProcessor.Start(storageContext),
-		consumerSupervisor.Start(storageContext),
-		flushTriggerCompletion,
+	backgroundCompletions := []backgroundWork{
+		{name: "the publisher reconnect loop", completion: publisher.RunReconnectLoop(storageContext)},
+		{name: "the batch writer", completion: batchWriter.Run(storageContext, flushTrigger)},
+		{name: "the fallback processor", completion: fallbackProcessor.Start(storageContext)},
+		{name: "the consumer supervisor", completion: consumerSupervisor.Start(storageContext)},
+		{name: "the flush trigger", completion: flushTriggerCompletion},
+		{name: "the rate limiter idle cleanup", completion: rateLimiter.StartIdleCleanup(storageContext, applicationConfiguration.RateLimitCleanupInterval)},
 	}
 	deadLetterCompletion := deadLetterWriter.Run()
-	rateLimiter.StartIdleCleanup(storageContext, applicationConfiguration.RateLimitCleanupInterval)
 
 	return &serverApplication{
 		requestRouter:         requestRouter,
@@ -182,6 +191,12 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		deadLetterWriter:      deadLetterWriter,
 		sqliteLogStore:        sqliteLogStore,
 		publisher:             publisher,
+		rawLogsQueue:          rawLogsQueue,
+		logEnricher:           logEnricher,
+		serviceRouter:         serviceRouter,
+		defaultDestination:    model.Destination(applicationConfiguration.DefaultDestination),
+		publishTimeout:        applicationConfiguration.PublishTimeout,
+		currentTimeProvider:   time.Now,
 	}, nil
 }
 
@@ -237,7 +252,7 @@ func runHTTPServerUntilContextIsCancelled(applicationContext context.Context, ap
 	case <-applicationContext.Done():
 	}
 
-	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), shutdownGracePeriod)
+	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), applicationConfiguration.ShutdownGracePeriod)
 	defer shutdownContextCancellation()
 	return httpServer.Shutdown(shutdownContext)
 }
@@ -256,16 +271,61 @@ func (application *serverApplication) stopBackgroundWork(gracePeriod time.Durati
 	defer shutdownContextCancellation()
 
 	application.cancelPipelineWork()
-	pipelineError := application.waitForCompletion(shutdownContext, application.pipelineCompletion, "the pipeline did not finish before the shutdown grace period expired")
+	pipelineError := application.drainPipeline(shutdownContext)
 
 	application.cancelStorageWork()
 	waitError := application.waitForBackgroundWork(shutdownContext)
-	application.batchWriter.FlushAll()
+	flushError := application.batchWriter.FlushAll()
 	deadLetterError := application.deadLetterWriter.Close()
 	deadLetterWaitError := application.waitForDeadLetterWriter(shutdownContext)
 	storeError := application.sqliteLogStore.Close()
 	publisherError := application.publisher.Close()
-	return errors.Join(pipelineError, waitError, deadLetterError, deadLetterWaitError, storeError, publisherError)
+	return errors.Join(pipelineError, waitError, flushError, deadLetterError, deadLetterWaitError, storeError, publisherError)
+}
+
+// Waits for the pipeline to publish every accepted log, dead-lettering the logs that miss the grace period.
+func (application *serverApplication) drainPipeline(shutdownContext context.Context) error {
+	pipelineError := application.waitForCompletion(shutdownContext, application.pipelineCompletion, "the pipeline did not finish before the shutdown grace period expired")
+	if pipelineError == nil {
+		return nil
+	}
+
+	deadLetterError := application.deadLetterUndrainedLogs()
+	drainExtensionContext, drainExtensionContextCancellation := context.WithTimeout(context.Background(), application.publishTimeout)
+	defer drainExtensionContextCancellation()
+	finishError := application.waitForCompletion(drainExtensionContext, application.pipelineCompletion, "the pipeline did not finish after the logs it could not process were dead-lettered")
+	return errors.Join(pipelineError, deadLetterError, finishError)
+}
+
+// Dead-letters the raw logs the pipeline could not process so no accepted log is lost.
+func (application *serverApplication) deadLetterUndrainedLogs() error {
+	undrainedLogs := application.rawLogsQueue.DrainRemainingLogs()
+	if len(undrainedLogs) == 0 {
+		return nil
+	}
+
+	slog.Warn("dead-lettering the logs the pipeline could not process before the shutdown", "log_count", len(undrainedLogs))
+	var deadLetterError error
+	for _, rawLog := range undrainedLogs {
+		enrichedLog := application.logEnricher.Enrich(rawLog)
+		routedLog, routeError := application.serviceRouter.Route(enrichedLog)
+		if routeError != nil {
+			slog.Error("routing the undrained log failed, using the default destination", "error", routeError, "batch_id", rawLog.BatchID)
+			routedLog = enrichedLog
+			routedLog.Destination = application.defaultDestination
+		}
+
+		deadLetterEntry := model.DeadLetterEntry{
+			Log:          routedLog,
+			ErrorMessage: "the application shut down before the log was processed",
+			FailedAt:     application.currentTimeProvider(),
+		}
+		if submitError := application.deadLetterWriter.Submit(deadLetterEntry); submitError != nil {
+			slog.Error("writing the dead letter entry failed", "error", submitError, "batch_id", rawLog.BatchID)
+			deadLetterError = errors.Join(deadLetterError, submitError)
+		}
+	}
+	return deadLetterError
 }
 
 // Waits for one background component to finish before the shutdown context expires.
@@ -281,15 +341,16 @@ func (application *serverApplication) waitForCompletion(shutdownContext context.
 
 // Waits for every background component to finish before the shutdown context expires.
 func (application *serverApplication) waitForBackgroundWork(shutdownContext context.Context) error {
-	for _, backgroundCompletion := range application.backgroundCompletions {
+	var waitError error
+	for _, backgroundComponent := range application.backgroundCompletions {
 		select {
-		case <-backgroundCompletion:
+		case <-backgroundComponent.completion:
 		case <-shutdownContext.Done():
-			slog.Warn("background work did not finish before the shutdown grace period expired")
-			return shutdownContext.Err()
+			slog.Warn("background work did not finish before the shutdown grace period expired", "background_work", backgroundComponent.name)
+			waitError = errors.Join(waitError, shutdownContext.Err())
 		}
 	}
-	return nil
+	return waitError
 }
 
 // Waits for the dead letter writer to finish draining after it was closed.
