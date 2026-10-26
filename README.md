@@ -6,7 +6,7 @@ A Go service that accepts logs over HTTP, validates and enriches them, routes th
 
 ## Architecture
 
-The source diagram lives in [`internal/dashboard/architecture.mmd`](internal/dashboard/architecture.mmd); the home page at `/` renders it with the vendored mermaid 11.6.0 library alongside the package responsibilities and nav links to the dashboard and metrics. Every component receives a single `ApplicationConfiguration` loaded from the configuration file and process environment.
+The source diagram lives in [`internal/dashboard/architecture.mmd`](internal/dashboard/architecture.mmd); the home page at `/` renders it with the vendored mermaid 11.6.0 library alongside a project summary, the design decisions and nav links to the dashboard and metrics. Every component receives a single `ApplicationConfiguration` loaded from the configuration file and process environment.
 
 ```mermaid
 flowchart LR
@@ -89,11 +89,15 @@ Go dependencies resolve from `go.mod` automatically on the first build.
 2. Confirm it is up with `curl -s -i localhost:8080`.
 3. Configuration auto-loading: The file path is `.env` in the working directory overridable with `CONFIG_FILE_PATH`; values already set in the environment always win.
 
+`cmd/server` is the composition root: it builds the rate limiter, ingestion handler, pipeline workers, publisher, consumers, batch writer, SQLite store and dead-letter writer from the configuration, starts them as background work and stops them in order. On shutdown the HTTP server stops first, the raw logs still queued are enriched, routed and published, the fallback is drained into the batch writer, the remaining batches are flushed to SQLite and the dead-letter file is closed before the process exits. A broker that is unreachable at startup is not fatal — the service starts, logs to the fallback and reconnects in the background.
+
 All settings come from environment variables with documented defaults in `configs/.env.example`; RabbitMQ credentials are required and the server fails fast with a readable error when a required value is missing or invalid including a malformed configuration file (a missing file is simply ignored).
 
 ## Client IP resolution
 
 Client IP is taken from the first entry of `X-Forwarded-For` (trimmed, validated as an IP, ignoring an empty or invalid first entry) when a trusted proxy forwarded the request, otherwise from the socket address host, otherwise `"unknown"`. `X-Forwarded-For` is client-controlled and only honored when the request comes from a configured trusted proxy; without one, the socket address host is used. The same function is used by the rate-limit middleware and for capturing `source_ip`. All `"unknown"` callers share one bucket. The limiter is in-memory and single-instance (lost on restart).
+
+Trusted proxies are configured with `TRUSTED_PROXIES` as a comma-separated list of CIDR prefixes, for example `10.0.0.0/8,192.168.0.0/16`. The list is empty by default, which means forwarded headers are ignored. Every entry is validated as a CIDR prefix at startup and an invalid prefix fails the boot with a readable error.
 
 ## Dead letters and replay
 

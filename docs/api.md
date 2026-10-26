@@ -156,3 +156,13 @@ Returns a snapshot of the service's runtime metrics as JSON. The endpoint never 
 On each `GET /metrics.json` request the service queries the RabbitMQ management API (`GET {RABBITMQ_MGMT_URL}/api/queues`, basic auth, bounded by `METRICS_BACKLOG_TIMEOUT`) and sums the `messages` field across `queue_service1`, `queue_service2` and `queue_service3`, ignoring any other queue on the broker.
 
 When the management API URL is not configured, unreachable, or rejects the request, the service logs a warning and reports a local fallback counter instead: an in-process estimate defined as messages published minus messages stored (`RecordQueueMessagePublished` / `RecordQueueMessageStored`), floored at zero. The fallback value is intentionally not part of the snapshot; only `queue_backlog` carries the effective value.
+
+## Other endpoints
+
+| Method | Path                 | Body shape |
+|--------|----------------------|------------|
+| GET    | `/`                  | The home page with the architecture diagram (`text/html`) |
+| GET    | `/dashboard`         | The dashboard page (`text/html`) |
+| GET    | `/dashboard/…`       | The vendored dashboard assets (`text/css`, `application/javascript`, `font/woff2`, `image/svg+xml`) |
+
+Unknown paths return `404` and a wrong method on a known path returns `405`.
