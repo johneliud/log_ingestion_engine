@@ -109,14 +109,14 @@ func (metrics *Metrics) SetQueueBacklog(backlog int) {
 	metrics.queueBacklog = backlog
 }
 
-// Records one message published to a RabbitMQ queue, raising the fallback backlog estimate.
+// Records one message handed to the broker or the in-memory fallback, raising the in-flight backlog estimate.
 func (metrics *Metrics) RecordQueueMessagePublished() {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
 	metrics.fallbackQueueBacklog++
 }
 
-// Records one queue message stored by a consumer, lowering the fallback backlog estimate.
+// Records one message stored by a consumer, lowering the in-flight backlog estimate.
 func (metrics *Metrics) RecordQueueMessageStored() {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
