@@ -38,3 +38,40 @@ type Metrics struct {
 	currentTimeProvider    func() time.Time
 }
 
+// Returns a metrics registry whose throughput window matches the configured duration.
+func NewMetrics(throughputWindow time.Duration, currentTimeProvider func() time.Time) *Metrics {
+	if throughputWindow <= 0 {
+		throughputWindow = time.Minute
+	}
+
+	if currentTimeProvider == nil {
+		currentTimeProvider = time.Now
+	}
+
+	throughputWindowCount := max(1, int(throughputWindow.Seconds()))
+	return &Metrics{
+		logsByLevel:            make(map[model.LogLevel]uint64),
+		logsByService:          make(map[string]uint64),
+		throughputWindow:       throughputWindow,
+		throughputWindowCount:  throughputWindowCount,
+		throughputWindowCounts: make([]uint64, throughputWindowCount),
+		currentTimeProvider:    currentTimeProvider,
+	}
+}
+
+// Records one accepted log, incrementing the total, level, service and throughput counters.
+func (metrics *Metrics) RecordLogsReceived(logs []model.LogEntry) {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+
+	for _, logEntry := range logs {
+		metrics.totalLogsReceived++
+		metrics.logsByLevel[logEntry.Level]++
+		metrics.logsByService[logEntry.Service]++
+	}
+
+	currentSecond := metrics.currentTimeProvider().Unix()
+	metrics.advanceThroughputWindowTo(currentSecond)
+	metrics.throughputWindowCounts[currentSecond%int64(metrics.throughputWindowCount)] += uint64(len(logs))
+}
+
