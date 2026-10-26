@@ -31,6 +31,8 @@ func TestRootEndpointHandler_ServesTheArchitectureHomePage(t *testing.T) {
 		"/dashboard/js/mermaid.min.js",
 		"/dashboard/js/architecture.js",
 		"/dashboard/css/styles.css",
+		"bg-white",
+		"text-slate-900",
 		"Package responsibilities",
 		"internal/config",
 		"internal/metrics",
@@ -47,5 +49,8 @@ func TestRootEndpointHandler_ServesTheArchitectureHomePage(t *testing.T) {
 	}
 	if !strings.Contains(string(pageScript), `fetch("/dashboard/architecture.mmd")`) {
 		t.Errorf("architecture.js does not fetch the embedded diagram source")
+	}
+	if !strings.Contains(string(pageScript), `theme: "neutral"`) {
+		t.Errorf("architecture.js does not render the diagram with the light mermaid theme")
 	}
 }

@@ -72,6 +72,9 @@ func TestDashboardHandler_ServesThePageWithEveryRequiredElement(t *testing.T) {
 					t.Errorf("page is missing the element id %q", requiredElementID)
 				}
 			}
+			if !strings.Contains(pageBody, "bg-white") {
+				t.Errorf("page does not use the white background")
+			}
 			for _, referencedAsset := range []string{"/dashboard/css/styles.css", "/dashboard/js/app.js", "/dashboard/js/chart.umd.js"} {
 				if !strings.Contains(pageBody, referencedAsset) {
 					t.Errorf("page does not reference %q", referencedAsset)
