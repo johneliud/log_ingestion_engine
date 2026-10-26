@@ -25,4 +25,6 @@
 
 @source "../../index.html";
 @source "../../root.html";
+@source "../../metrics.html";
 @source "../js/app.js";
+@source "../js/metrics.js";

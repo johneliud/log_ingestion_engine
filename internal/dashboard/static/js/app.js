@@ -14,7 +14,7 @@ let topServicesChartInstance = null;
 // Returns one metrics snapshot from the JSON endpoint, or null when the poll fails.
 async function fetchMetricsSnapshot() {
     try {
-        const response = await fetch("/metrics");
+        const response = await fetch("/metrics.json");
         if (!response.ok) {
             return null;
         }
