@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"maps"
 	"sync"
 	"time"
 
@@ -114,9 +115,7 @@ func (metrics *Metrics) Snapshot() Snapshot {
 	}
 
 	logsByService := make(map[string]uint64, len(metrics.logsByService))
-	for serviceName, count := range metrics.logsByService {
-		logsByService[serviceName] = count
-	}
+	maps.Copy(logsByService, metrics.logsByService)
 
 	errorRate := float64(0)
 	if metrics.totalLogsReceived > 0 {
@@ -153,16 +152,16 @@ func (metrics *Metrics) advanceThroughputWindowTo(currentSecond int64) {
 		metrics.hasRecordedThroughput = true
 		return
 	}
-	
+
 	if currentSecond == metrics.lastThroughputSecond {
 		return
 	}
-	
+
 	secondsElapsed := currentSecond - metrics.lastThroughputSecond
 	if secondsElapsed <= 0 {
 		return
 	}
-	
+
 	if secondsElapsed >= int64(metrics.throughputWindowCount) {
 		for bucketIndex := range metrics.throughputWindowCounts {
 			metrics.throughputWindowCounts[bucketIndex] = 0
