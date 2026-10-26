@@ -71,6 +71,11 @@ function showMetricsStatus(statusMessage) {
     statusElement.classList.remove("hidden");
 }
 
+// Hides the status line after a snapshot was loaded successfully.
+function hideMetricsStatus() {
+    document.getElementById("metrics-status").classList.add("hidden");
+}
+
 // Fetches one snapshot and updates every value on the page.
 async function refreshMetricsPage() {
     const snapshot = await fetchMetricsSnapshot();
@@ -78,6 +83,7 @@ async function refreshMetricsPage() {
         showMetricsStatus("the metrics snapshot could not be loaded");
         return;
     }
+    hideMetricsStatus();
     updateCounterCards(snapshot);
     const levelRows = Object.entries(snapshot.logs_by_level).map(([levelName, levelCount]) => metricTableRow(levelName, levelCount));
     replaceTableRows("logs-by-level-table", levelRows);
@@ -88,10 +94,16 @@ async function refreshMetricsPage() {
     setPlainValue("last-refreshed", "refreshed at " + new Date().toLocaleTimeString());
 }
 
-// Starts the five-second polling loop with an immediate first refresh.
+// Starts the polling loop, waiting for each refresh to settle before the next one starts.
 function startMetricsPolling() {
-    refreshMetricsPage();
-    setInterval(refreshMetricsPage, metricsPollingIntervalMilliseconds);
+    const refreshAfterThePreviousOneSettled = async () => {
+        try {
+            await refreshMetricsPage();
+        } finally {
+            setTimeout(refreshAfterThePreviousOneSettled, metricsPollingIntervalMilliseconds);
+        }
+    };
+    refreshAfterThePreviousOneSettled();
 }
 
 startMetricsPolling();

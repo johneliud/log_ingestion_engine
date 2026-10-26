@@ -92,6 +92,26 @@ function updateTopServicesTable(topServices) {
     tableBody.replaceChildren(...topServices.map(topServiceRow));
 }
 
+// Builds one row of a time-series table with its timestamp and formatted value.
+function timeSeriesRow(timeLabel, formattedValue) {
+    const row = document.createElement("tr");
+    const timeCell = document.createElement("td");
+    timeCell.className = "py-1";
+    timeCell.textContent = timeLabel;
+    const valueCell = document.createElement("td");
+    valueCell.className = "py-1 text-right";
+    valueCell.textContent = formattedValue;
+    row.append(timeCell, valueCell);
+    return row;
+}
+
+// Replaces one time-series table body with the rows of the shared history so screen readers get the chart data.
+function updateTimeSeriesTable(tableBodyID, seriesValues, formatSeriesValue) {
+    const tableBody = document.getElementById(tableBodyID);
+    const tableRows = historyTimestampLabels.map((timeLabel, pointIndex) => timeSeriesRow(timeLabel, formatSeriesValue(seriesValues[pointIndex])));
+    tableBody.replaceChildren(...tableRows);
+}
+
 // Creates the throughput line chart on first refresh and updates it from the shared history afterwards.
 function updateThroughputChart() {
     if (throughputChartInstance !== null) {
@@ -198,13 +218,21 @@ async function refreshDashboardFromSnapshot() {
     updateThroughputChart();
     updateErrorRateChart();
     updateTopServicesChart(topServices);
+    updateTimeSeriesTable("throughput-chart-table", logsPerSecondHistory, (seriesValue) => seriesValue.toFixed(2));
+    updateTimeSeriesTable("error-rate-chart-table", errorRateHistory, (seriesValue) => (seriesValue * 100).toFixed(2) + "%");
     updateLastRefreshed();
 }
 
-// Starts the five-second polling loop with an immediate first refresh.
+// Starts the polling loop, waiting for each refresh to settle before the next one starts.
 function startDashboardPolling() {
-    refreshDashboardFromSnapshot();
-    setInterval(refreshDashboardFromSnapshot, pollingIntervalMilliseconds);
+    const refreshAfterThePreviousOneSettled = async () => {
+        try {
+            await refreshDashboardFromSnapshot();
+        } finally {
+            setTimeout(refreshAfterThePreviousOneSettled, pollingIntervalMilliseconds);
+        }
+    };
+    refreshAfterThePreviousOneSettled();
 }
 
 startDashboardPolling();
