@@ -241,3 +241,19 @@ func TestMetrics_FallbackQueueBacklogCounterTracksPublishedMinusStored(t *testin
 		t.Errorf("fallback backlog = %d, want 3 (four published minus one stored)", fallbackBacklog)
 	}
 }
+
+func TestMetrics_FallbackQueueBacklogCounterDropsForReleasedMessages(t *testing.T) {
+	t.Parallel()
+
+	metricsRegistry := NewMetrics(time.Minute, nil)
+	metricsRegistry.RecordQueueMessagePublished()
+	metricsRegistry.RecordQueueMessageReleased()
+	if fallbackBacklog := metricsRegistry.FallbackQueueBacklog(); fallbackBacklog != 0 {
+		t.Errorf("fallback backlog = %d, want 0 (the published message left the pipeline)", fallbackBacklog)
+	}
+
+	metricsRegistry.RecordQueueMessageReleased()
+	if fallbackBacklog := metricsRegistry.FallbackQueueBacklog(); fallbackBacklog != 0 {
+		t.Errorf("fallback backlog = %d, want 0; the counter must not fall below zero", fallbackBacklog)
+	}
+}

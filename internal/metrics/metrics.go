@@ -125,6 +125,15 @@ func (metrics *Metrics) RecordQueueMessageStored() {
 	}
 }
 
+// Records one message that left the pipeline without being stored, such as a dead-lettered log, lowering the in-flight backlog estimate.
+func (metrics *Metrics) RecordQueueMessageReleased() {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	if metrics.fallbackQueueBacklog > 0 {
+		metrics.fallbackQueueBacklog--
+	}
+}
+
 // Returns the local backlog estimate reported when the management API cannot be reached.
 func (metrics *Metrics) FallbackQueueBacklog() int {
 	metrics.mutex.RLock()
