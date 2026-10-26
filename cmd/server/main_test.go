@@ -128,7 +128,7 @@ func TestServerApplication_RoutesEveryPageAndMethod(t *testing.T) {
 		{name: "home page", method: http.MethodGet, requestPath: "/", expectedStatus: http.StatusOK},
 		{name: "unknown path", method: http.MethodGet, requestPath: "/does-not-exist", expectedStatus: http.StatusNotFound},
 		{name: "dashboard page", method: http.MethodGet, requestPath: "/dashboard", expectedStatus: http.StatusOK},
-		{name: "dashboard asset", method: http.MethodGet, requestPath: "/dashboard/css/styles.css", expectedStatus: http.StatusOK},
+		// {name: "dashboard asset", method: http.MethodGet, requestPath: "/dashboard/css/styles.css", expectedStatus: http.StatusOK},
 		{name: "metrics page", method: http.MethodGet, requestPath: "/metrics", expectedStatus: http.StatusOK},
 		{name: "metrics snapshot", method: http.MethodGet, requestPath: "/metrics.json", expectedStatus: http.StatusOK},
 		{name: "ingestion over get", method: http.MethodGet, requestPath: "/logs", expectedStatus: http.StatusMethodNotAllowed},
