@@ -21,42 +21,47 @@ type Snapshot struct {
 	WriteFailures       uint64            `json:"write_failures"`
 }
 
+const (
+	defaultThroughputWindow = time.Minute
+	maximumThroughputWindow = time.Hour
+)
+
 // Owns every metric counter and the sliding throughput window used to compute logs per second.
 type Metrics struct {
-	mutex                  sync.RWMutex
-	totalLogsReceived      uint64
-	logsByLevel            map[model.LogLevel]uint64
-	logsByService          map[string]uint64
-	rateLimitedRequests    uint64
-	deadLetteredLogs       uint64
-	writeFailures          uint64
-	queueBacklog           int
-	throughputWindow       time.Duration
-	throughputWindowCount  int
-	throughputWindowCounts []uint64
-	lastThroughputSecond   int64
-	hasRecordedThroughput  bool
-	currentTimeProvider    func() time.Time
+	mutex                 sync.RWMutex
+	totalLogsReceived     uint64
+	logsByLevel           map[model.LogLevel]uint64
+	logsByService         map[string]uint64
+	rateLimitedRequests   uint64
+	deadLetteredLogs      uint64
+	writeFailures         uint64
+	queueBacklog          int
+	throughputWindow      time.Duration
+	throughputWindowLogs  uint64
+	lastThroughputTime    time.Time
+	hasRecordedThroughput bool
+	currentTimeProvider   func() time.Time
 }
 
 // Returns a metrics registry whose throughput window matches the configured duration.
 func NewMetrics(throughputWindow time.Duration, currentTimeProvider func() time.Time) *Metrics {
 	if throughputWindow <= 0 {
-		throughputWindow = time.Minute
+		throughputWindow = defaultThroughputWindow
 	}
-
+	if throughputWindow > maximumThroughputWindow {
+		throughputWindow = maximumThroughputWindow
+	}
 	if currentTimeProvider == nil {
 		currentTimeProvider = time.Now
 	}
-
-	throughputWindowCount := max(1, int(throughputWindow.Seconds()))
 	return &Metrics{
-		logsByLevel:            make(map[model.LogLevel]uint64),
-		logsByService:          make(map[string]uint64),
-		throughputWindow:       throughputWindow,
-		throughputWindowCount:  throughputWindowCount,
-		throughputWindowCounts: make([]uint64, throughputWindowCount),
-		currentTimeProvider:    currentTimeProvider,
+		logsByLevel:           make(map[model.LogLevel]uint64),
+		logsByService:         make(map[string]uint64),
+		throughputWindow:      throughputWindow,
+		throughputWindowLogs:  0,
+		lastThroughputTime:    time.Time{},
+		hasRecordedThroughput: false,
+		currentTimeProvider:   currentTimeProvider,
 	}
 }
 
@@ -71,9 +76,8 @@ func (metrics *Metrics) RecordLogsReceived(logs []model.LogEntry) {
 		metrics.logsByService[logEntry.Service]++
 	}
 
-	currentSecond := metrics.currentTimeProvider().Unix()
-	metrics.advanceThroughputWindowTo(currentSecond)
-	metrics.throughputWindowCounts[currentSecond%int64(metrics.throughputWindowCount)] += uint64(len(logs))
+	metrics.advanceThroughputWindowTo(metrics.currentTimeProvider())
+	metrics.throughputWindowLogs += uint64(len(logs))
 }
 
 // Records one request rejected by the rate limiter.
@@ -106,8 +110,9 @@ func (metrics *Metrics) SetQueueBacklog(backlog int) {
 
 // Returns an immutable copy of every metric with error rate and throughput already computed.
 func (metrics *Metrics) Snapshot() Snapshot {
-	metrics.mutex.RLock()
-	defer metrics.mutex.RUnlock()
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	metrics.advanceThroughputWindowTo(metrics.currentTimeProvider())
 
 	logsByLevel := make(map[string]uint64, len(metrics.logsByLevel))
 	for level, count := range metrics.logsByLevel {
@@ -123,13 +128,8 @@ func (metrics *Metrics) Snapshot() Snapshot {
 	}
 
 	throughput := float64(0)
-	windowDurationInSeconds := metrics.throughputWindow.Seconds()
-	if windowDurationInSeconds > 0 {
-		var throughputWindowTotal uint64
-		for _, count := range metrics.throughputWindowCounts {
-			throughputWindowTotal += count
-		}
-		throughput = float64(throughputWindowTotal) / windowDurationInSeconds
+	if metrics.hasRecordedThroughput {
+		throughput = float64(metrics.throughputWindowLogs) / metrics.throughputWindow.Seconds()
 	}
 
 	return Snapshot{
@@ -145,31 +145,18 @@ func (metrics *Metrics) Snapshot() Snapshot {
 	}
 }
 
-// Clears every throughput-window bucket whose second is older than the current second.
-func (metrics *Metrics) advanceThroughputWindowTo(currentSecond int64) {
+// Clears the throughput window once the configured duration has elapsed and starts a new accumulation.
+func (metrics *Metrics) advanceThroughputWindowTo(currentTime time.Time) {
 	if !metrics.hasRecordedThroughput {
-		metrics.lastThroughputSecond = currentSecond
+		metrics.lastThroughputTime = currentTime
 		metrics.hasRecordedThroughput = true
 		return
 	}
 
-	if currentSecond == metrics.lastThroughputSecond {
+	if currentTime.Sub(metrics.lastThroughputTime) < metrics.throughputWindow {
 		return
 	}
 
-	secondsElapsed := currentSecond - metrics.lastThroughputSecond
-	if secondsElapsed <= 0 {
-		return
-	}
-
-	if secondsElapsed >= int64(metrics.throughputWindowCount) {
-		for bucketIndex := range metrics.throughputWindowCounts {
-			metrics.throughputWindowCounts[bucketIndex] = 0
-		}
-	} else {
-		for clearedSecond := metrics.lastThroughputSecond + 1; clearedSecond <= currentSecond; clearedSecond++ {
-			metrics.throughputWindowCounts[clearedSecond%int64(metrics.throughputWindowCount)] = 0
-		}
-	}
-	metrics.lastThroughputSecond = currentSecond
+	metrics.throughputWindowLogs = 0
+	metrics.lastThroughputTime = currentTime
 }
