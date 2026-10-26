@@ -146,3 +146,31 @@ func (metrics *Metrics) Snapshot() Snapshot {
 	}
 }
 
+// Clears every throughput-window bucket whose second is older than the current second.
+func (metrics *Metrics) advanceThroughputWindowTo(currentSecond int64) {
+	if !metrics.hasRecordedThroughput {
+		metrics.lastThroughputSecond = currentSecond
+		metrics.hasRecordedThroughput = true
+		return
+	}
+	
+	if currentSecond == metrics.lastThroughputSecond {
+		return
+	}
+	
+	secondsElapsed := currentSecond - metrics.lastThroughputSecond
+	if secondsElapsed <= 0 {
+		return
+	}
+	
+	if secondsElapsed >= int64(metrics.throughputWindowCount) {
+		for bucketIndex := range metrics.throughputWindowCounts {
+			metrics.throughputWindowCounts[bucketIndex] = 0
+		}
+	} else {
+		for clearedSecond := metrics.lastThroughputSecond + 1; clearedSecond <= currentSecond; clearedSecond++ {
+			metrics.throughputWindowCounts[clearedSecond%int64(metrics.throughputWindowCount)] = 0
+		}
+	}
+	metrics.lastThroughputSecond = currentSecond
+}
