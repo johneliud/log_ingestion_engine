@@ -233,6 +233,35 @@ func TestPublisher_DoesNotCountAMessageWhenTheFallbackIsFull(t *testing.T) {
 	}
 }
 
+func TestVirtualHostPaths_EscapesTheDefaultAndNamedVirtualHosts(t *testing.T) {
+	t.Parallel()
+
+	virtualHostCases := []struct {
+		name                string
+		rabbitMQVirtualHost string
+		expectedPath        string
+		expectedRawPath     string
+	}{
+		{name: "the default virtual host", rabbitMQVirtualHost: "", expectedPath: "//", expectedRawPath: "/%2F"},
+		{name: "a named virtual host", rabbitMQVirtualHost: "log-engine", expectedPath: "/log-engine", expectedRawPath: "/log-engine"},
+		{name: "a virtual host with a space", rabbitMQVirtualHost: "log engine", expectedPath: "/log engine", expectedRawPath: "/log%20engine"},
+	}
+
+	for _, virtualHostCase := range virtualHostCases {
+		t.Run(virtualHostCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			virtualHostPath, virtualHostRawPath := virtualHostPaths(virtualHostCase.rabbitMQVirtualHost)
+			if virtualHostPath != virtualHostCase.expectedPath {
+				t.Errorf("virtual host path = %q, want %q", virtualHostPath, virtualHostCase.expectedPath)
+			}
+			if virtualHostRawPath != virtualHostCase.expectedRawPath {
+				t.Errorf("virtual host raw path = %q, want %q", virtualHostRawPath, virtualHostCase.expectedRawPath)
+			}
+		})
+	}
+}
+
 func TestReconnectDelayAt_ReusesTheLastConfiguredDelay(t *testing.T) {
 	t.Parallel()
 

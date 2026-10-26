@@ -347,18 +347,29 @@ func (publisher *Publisher) markDisconnected() {
 	}
 }
 
-// Opens a broker connection with the configured host, port and credentials.
+// Opens a broker connection with the configured host, port, credentials and virtual host.
 func DialBroker(applicationConfiguration config.ApplicationConfiguration) (*amqp.Connection, error) {
 	scheme := "amqp"
 	if applicationConfiguration.RabbitMQUseTLS {
 		scheme = "amqps"
 	}
+	virtualHostPath, virtualHostRawPath := virtualHostPaths(applicationConfiguration.RabbitMQVirtualHost)
 	connectionURL := url.URL{
-		Scheme: scheme,
-		User:   url.UserPassword(applicationConfiguration.RabbitMQUsername, applicationConfiguration.RabbitMQPassword),
-		Host:   net.JoinHostPort(applicationConfiguration.RabbitMQHost, strconv.Itoa(applicationConfiguration.RabbitMQPort)),
+		Scheme:  scheme,
+		User:    url.UserPassword(applicationConfiguration.RabbitMQUsername, applicationConfiguration.RabbitMQPassword),
+		Host:    net.JoinHostPort(applicationConfiguration.RabbitMQHost, strconv.Itoa(applicationConfiguration.RabbitMQPort)),
+		Path:    virtualHostPath,
+		RawPath: virtualHostRawPath,
 	}
 	return amqp.Dial(connectionURL.String())
+}
+
+// Returns the decoded and escaped URL paths that select the virtual host.
+func virtualHostPaths(rabbitMQVirtualHost string) (string, string) {
+	if rabbitMQVirtualHost == "" {
+		rabbitMQVirtualHost = config.DefaultRabbitMQVirtualHost
+	}
+	return "/" + rabbitMQVirtualHost, "/" + url.PathEscape(rabbitMQVirtualHost)
 }
 
 // Returns the fallback channel.
