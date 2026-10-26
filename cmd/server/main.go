@@ -35,7 +35,8 @@ type backgroundWork struct {
 
 // Holds the wired request router and the background work the application owns.
 type serverApplication struct {
-	requestRouter         *http.ServeMux
+	requestRouter         http.Handler
+	inFlightRequests      *sync.WaitGroup
 	cancelPipelineWork    context.CancelFunc
 	cancelStorageWork     context.CancelFunc
 	pipelineCompletion    <-chan struct{}
@@ -49,7 +50,6 @@ type serverApplication struct {
 	logEnricher           *enrich.LogEnricher
 	serviceRouter         *router.ServiceRouter
 	defaultDestination    model.Destination
-	publishTimeout        time.Duration
 	currentTimeProvider   func() time.Time
 	shutdownOnce          sync.Once
 	shutdownError         error
@@ -73,10 +73,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	serveError := runHTTPServerUntilContextIsCancelled(applicationContext, applicationConfiguration, serverApplication.requestRouter)
-	shutdownError := serverApplication.shutdownBackgroundWork(applicationConfiguration.ShutdownGracePeriod)
+	httpServer := newHTTPServer(applicationConfiguration, serverApplication.requestRouter)
+	serverListenErrorChannel := startHTTPServer(httpServer)
+	serveError := waitForTheServerToStop(applicationContext, serverListenErrorChannel)
+
+	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), applicationConfiguration.ShutdownGracePeriod)
+	defer shutdownContextCancellation()
+	httpShutdownError := shutdownHTTPServer(httpServer, shutdownContext)
+	shutdownError := serverApplication.shutdownBackgroundWork(shutdownContext)
 	if serveError != nil {
 		slog.Error("http server stopped unexpectedly", "server_error", serveError)
+		os.Exit(1)
+	}
+	if httpShutdownError != nil {
+		slog.Error("stopping the http server failed", "shutdown_error", httpShutdownError)
 		os.Exit(1)
 	}
 	if shutdownError != nil {
@@ -106,14 +116,18 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	publisher := queue.NewPublisher(applicationConfiguration, applicationConfiguration.RawLogsBufferSize, queue.WithPublishedMessageRecorder(metricsRegistry))
 
-	batchConsumer := pipeline.NewBatchConsumer(
-		rawLogsQueue.RawLogsChannel(),
-		applicationConfiguration.ConsumerBatchSize,
-		applicationConfiguration.PipelineWorkerCount,
-		logEnricher,
-		serviceRouter,
-		publisher,
-	)
+	deadLetterWriter := storage.NewDeadLetterWriter(applicationConfiguration)
+
+	batchConsumer := pipeline.NewBatchConsumer(pipeline.BatchConsumerDependencies{
+		RawLogsChannel:     rawLogsQueue.RawLogsChannel(),
+		ConsumerBatchSize:  applicationConfiguration.ConsumerBatchSize,
+		WorkerCount:        applicationConfiguration.PipelineWorkerCount,
+		Enricher:           logEnricher,
+		Router:             serviceRouter,
+		QueuePublisher:     publisher,
+		DeadLetterSink:     deadLetterWriter.Submit,
+		DefaultDestination: model.Destination(applicationConfiguration.DefaultDestination),
+	})
 
 	sqliteLogStore, storeError := storage.NewSQLiteLogStore(applicationConfiguration)
 	if storeError != nil {
@@ -121,8 +135,6 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		cancelStorageWork()
 		return nil, storeError
 	}
-
-	deadLetterWriter := storage.NewDeadLetterWriter(applicationConfiguration)
 
 	batchWriter := storage.NewBatchWriter(storage.BatchWriterDependencies{
 		ApplicationContext: storageContext,
@@ -154,6 +166,9 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	requestRouter := buildRequestRouter(applicationConfiguration, rateLimitMiddleware(ingestionHandler), metricsRegistry)
 
+	var inFlightRequests sync.WaitGroup
+	trackedRequestRouter := trackRunningRequests(requestRouter, &inFlightRequests)
+
 	fallbackProcessor := consumer.NewFallbackProcessor(publisher.FallbackChannel(), batchWriter)
 
 	consumerSupervisor := consumer.NewSupervisor(consumer.SupervisorDependencies{
@@ -181,7 +196,8 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 	deadLetterCompletion := deadLetterWriter.Run()
 
 	return &serverApplication{
-		requestRouter:         requestRouter,
+		requestRouter:         trackedRequestRouter,
+		inFlightRequests:      &inFlightRequests,
 		cancelPipelineWork:    cancelPipelineWork,
 		cancelStorageWork:     cancelStorageWork,
 		pipelineCompletion:    pipelineCompletion,
@@ -195,9 +211,17 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		logEnricher:           logEnricher,
 		serviceRouter:         serviceRouter,
 		defaultDestination:    model.Destination(applicationConfiguration.DefaultDestination),
-		publishTimeout:        applicationConfiguration.PublishTimeout,
 		currentTimeProvider:   time.Now,
 	}, nil
+}
+
+// Counts the running requests so the shutdown can wait for the producers to stop.
+func trackRunningRequests(next http.Handler, runningRequests *sync.WaitGroup) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		runningRequests.Add(1)
+		defer runningRequests.Done()
+		next.ServeHTTP(responseWriter, request)
+	})
 }
 
 // Builds the request router with the ingestion, metrics, dashboard and home page routes wired.
@@ -233,54 +257,92 @@ func logConfigurationSummary(applicationConfiguration config.ApplicationConfigur
 	)
 }
 
-// Serves the wired request router until the context is cancelled, then shuts the server down within the shutdown grace period.
-func runHTTPServerUntilContextIsCancelled(applicationContext context.Context, applicationConfiguration config.ApplicationConfiguration, requestRouter *http.ServeMux) error {
-	httpServer := &http.Server{
+// Builds the HTTP server that serves the wired request router.
+func newHTTPServer(applicationConfiguration config.ApplicationConfiguration, requestRouter http.Handler) *http.Server {
+	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", applicationConfiguration.HTTPPort),
 		Handler: requestRouter,
 	}
+}
 
+// Starts the HTTP server in the background and returns the channel that reports the listen error.
+func startHTTPServer(httpServer *http.Server) <-chan error {
 	serverListenErrorChannel := make(chan error, 1)
 	go func() {
 		serverListenErrorChannel <- httpServer.ListenAndServe()
 	}()
+	return serverListenErrorChannel
+}
+
+// Waits for the signal or a listen failure and returns the listen error when the server failed.
+func waitForTheServerToStop(applicationContext context.Context, serverListenErrorChannel <-chan error) error {
 	select {
 	case serverListenError := <-serverListenErrorChannel:
 		if !errors.Is(serverListenError, http.ErrServerClosed) {
 			return serverListenError
 		}
+		return nil
 	case <-applicationContext.Done():
+		return nil
+	}
+}
+
+// Stops accepting requests, closes the connections that outlast the deadline and reports the shutdown failure.
+func shutdownHTTPServer(httpServer *http.Server, shutdownContext context.Context) error {
+	shutdownError := httpServer.Shutdown(shutdownContext)
+	if shutdownError == nil {
+		return nil
 	}
 
-	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), applicationConfiguration.ShutdownGracePeriod)
-	defer shutdownContextCancellation()
-	return httpServer.Shutdown(shutdownContext)
+	slog.Warn("the http server did not stop within the shutdown grace period, closing the remaining connections", "error", shutdownError)
+	if closeError := httpServer.Close(); closeError != nil {
+		return errors.Join(shutdownError, closeError)
+	}
+	return shutdownError
 }
 
 // Stops the background work in order and closes the storage components.
-func (application *serverApplication) shutdownBackgroundWork(gracePeriod time.Duration) error {
+func (application *serverApplication) shutdownBackgroundWork(shutdownContext context.Context) error {
 	application.shutdownOnce.Do(func() {
-		application.shutdownError = application.stopBackgroundWork(gracePeriod)
+		application.shutdownError = application.stopBackgroundWork(shutdownContext)
 	})
 	return application.shutdownError
 }
 
 // Cancels the pipeline, drains the raw logs, then stops the storage side and closes the storage components.
-func (application *serverApplication) stopBackgroundWork(gracePeriod time.Duration) error {
-	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), gracePeriod)
-	defer shutdownContextCancellation()
+func (application *serverApplication) stopBackgroundWork(shutdownContext context.Context) error {
+	runningRequestsError := application.waitForRunningRequests(shutdownContext)
 
 	application.cancelPipelineWork()
 	pipelineError := application.drainPipeline(shutdownContext)
 
+	publisherError := application.publisher.Close()
+	undrainedLogsError := application.deadLetterRemainingRawLogs()
+
 	application.cancelStorageWork()
 	waitError := application.waitForBackgroundWork(shutdownContext)
 	flushError := application.batchWriter.FlushAll()
+	storeError := application.sqliteLogStore.Close()
 	deadLetterError := application.deadLetterWriter.Close()
 	deadLetterWaitError := application.waitForDeadLetterWriter(shutdownContext)
-	storeError := application.sqliteLogStore.Close()
-	publisherError := application.publisher.Close()
-	return errors.Join(pipelineError, waitError, flushError, deadLetterError, deadLetterWaitError, storeError, publisherError)
+	return errors.Join(runningRequestsError, pipelineError, publisherError, undrainedLogsError, waitError, flushError, storeError, deadLetterError, deadLetterWaitError)
+}
+
+// Waits for the running requests to finish so no producer pushes into the raw logs after the drain.
+func (application *serverApplication) waitForRunningRequests(shutdownContext context.Context) error {
+	requestsCompleted := make(chan struct{})
+	go func() {
+		application.inFlightRequests.Wait()
+		close(requestsCompleted)
+	}()
+
+	select {
+	case <-requestsCompleted:
+		return nil
+	case <-shutdownContext.Done():
+		slog.Warn("the running requests did not finish before the shutdown grace period expired")
+		return shutdownContext.Err()
+	}
 }
 
 // Waits for the pipeline to publish every accepted log, dead-lettering the logs that miss the grace period.
@@ -290,15 +352,12 @@ func (application *serverApplication) drainPipeline(shutdownContext context.Cont
 		return nil
 	}
 
-	deadLetterError := application.deadLetterUndrainedLogs()
-	drainExtensionContext, drainExtensionContextCancellation := context.WithTimeout(context.Background(), application.publishTimeout)
-	defer drainExtensionContextCancellation()
-	finishError := application.waitForCompletion(drainExtensionContext, application.pipelineCompletion, "the pipeline did not finish after the logs it could not process were dead-lettered")
-	return errors.Join(pipelineError, deadLetterError, finishError)
+	deadLetterError := application.deadLetterRemainingRawLogs()
+	return errors.Join(pipelineError, deadLetterError)
 }
 
 // Dead-letters the raw logs the pipeline could not process so no accepted log is lost.
-func (application *serverApplication) deadLetterUndrainedLogs() error {
+func (application *serverApplication) deadLetterRemainingRawLogs() error {
 	undrainedLogs := application.rawLogsQueue.DrainRemainingLogs()
 	if len(undrainedLogs) == 0 {
 		return nil

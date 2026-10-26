@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,7 +70,7 @@ func newTestServerApplication(t *testing.T, applicationConfiguration config.Appl
 		t.Fatalf("building the application failed: %v", applicationError)
 	}
 	t.Cleanup(func() {
-		if shutdownError := serverApplication.shutdownBackgroundWork(testShutdownGracePeriod); shutdownError != nil {
+		if shutdownError := serverApplication.shutdownBackgroundWork(aTestShutdownContext(t)); shutdownError != nil {
 			t.Errorf("stopping the background work failed: %v", shutdownError)
 		}
 	})
@@ -163,6 +165,15 @@ func logBatchBodyForServices(serviceNames []string) string {
 	return "[" + strings.Join(logEntries, ",") + "]"
 }
 
+// Returns the shutdown context the tests use for the background work.
+func aTestShutdownContext(t *testing.T) context.Context {
+	t.Helper()
+
+	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), testShutdownGracePeriod)
+	t.Cleanup(shutdownContextCancellation)
+	return shutdownContext
+}
+
 // Waits for the pipeline workers to stop after the pipeline work was cancelled.
 func waitForPipelineCompletion(t *testing.T, serverApplication *serverApplication) {
 	t.Helper()
@@ -234,7 +245,7 @@ func TestServerApplication_StoresAnAcceptedLogThroughTheFallbackPath(t *testing.
 		t.Fatalf("ingestion status = %d, want %d", responseRecorder.Code, http.StatusAccepted)
 	}
 
-	if shutdownError := serverApplication.shutdownBackgroundWork(testShutdownGracePeriod); shutdownError != nil {
+	if shutdownError := serverApplication.shutdownBackgroundWork(aTestShutdownContext(t)); shutdownError != nil {
 		t.Fatalf("stopping the background work failed: %v", shutdownError)
 	}
 
@@ -307,7 +318,7 @@ func TestServerApplication_StoresEveryAcceptedLogOrDeadLettersItWhenTheApplicati
 		acceptedLogCount += len(serviceNames)
 	}
 
-	if shutdownError := serverApplication.shutdownBackgroundWork(testShutdownGracePeriod); shutdownError != nil {
+	if shutdownError := serverApplication.shutdownBackgroundWork(aTestShutdownContext(t)); shutdownError != nil {
 		t.Fatalf("stopping the background work failed: %v", shutdownError)
 	}
 
@@ -319,6 +330,53 @@ func TestServerApplication_StoresEveryAcceptedLogOrDeadLettersItWhenTheApplicati
 	if storedLogCount != acceptedLogCount {
 		t.Errorf("stored log count = %d, want the %d accepted logs", storedLogCount, acceptedLogCount)
 	}
+}
+
+func TestServerApplication_WaitsForTheRunningRequestsBeforeItDrainsTheRawLogs(t *testing.T) {
+	t.Parallel()
+
+	var runningRequests sync.WaitGroup
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	requestFinished := make(chan struct{})
+	blockingHandler := http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		close(requestFinished)
+	})
+	trackedHandler := trackRunningRequests(blockingHandler, &runningRequests)
+	serverApplication := &serverApplication{inFlightRequests: &runningRequests}
+
+	requestServed := make(chan struct{})
+	go func() {
+		trackedHandler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader("")))
+		close(requestServed)
+	}()
+	<-requestStarted
+
+	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), testShutdownGracePeriod)
+	defer shutdownContextCancellation()
+	waitCompleted := make(chan error, 1)
+	go func() {
+		waitCompleted <- serverApplication.waitForRunningRequests(shutdownContext)
+	}()
+
+	close(releaseRequest)
+	select {
+	case waitError := <-waitCompleted:
+		if waitError != nil {
+			t.Fatalf("waiting for the running requests failed: %v", waitError)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shutdown did not finish waiting for the running request")
+	}
+
+	select {
+	case <-requestFinished:
+	default:
+		t.Fatal("the shutdown finished before the running request returned")
+	}
+	<-requestServed
 }
 
 func TestServerApplication_DeadLettersTheLogsThePipelineCouldNotProcess(t *testing.T) {
@@ -339,7 +397,7 @@ func TestServerApplication_DeadLettersTheLogsThePipelineCouldNotProcess(t *testi
 		t.Fatalf("queueing the undrained logs failed: %v", pushError)
 	}
 
-	if deadLetterError := serverApplication.deadLetterUndrainedLogs(); deadLetterError != nil {
+	if deadLetterError := serverApplication.deadLetterRemainingRawLogs(); deadLetterError != nil {
 		t.Fatalf("dead-lettering the undrained logs failed: %v", deadLetterError)
 	}
 	if closeError := serverApplication.deadLetterWriter.Close(); closeError != nil {
