@@ -223,7 +223,9 @@ func TestBatchWriter_DeadLettersLogsAfterFinalStoreFailure(t *testing.T) {
 		t.Errorf("dead letter failure time = %s, want %s", deadLetteredEntry.FailedAt, failedAt)
 	}
 
-	batchWriter.FlushAll()
+	if flushError := batchWriter.FlushAll(); flushError != nil {
+		t.Fatalf("flushing the dead-lettered batch failed: %v", flushError)
+	}
 	if storeAttemptCount != 1 {
 		t.Errorf("store attempt count after flush = %d, want 1; dead-lettered logs must not be retried again", storeAttemptCount)
 	}

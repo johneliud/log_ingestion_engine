@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -119,27 +120,43 @@ func (batchWriter *BatchWriter) Run(applicationContext context.Context, flushTri
 		for {
 			select {
 			case <-applicationContext.Done():
-				batchWriter.FlushAll()
+				batchWriter.flushAndReportErrors()
 				return
 			case <-flushTrigger:
-				batchWriter.FlushAll()
+				batchWriter.flushAndReportErrors()
 			}
 		}
 	}()
 	return completed
 }
 
+// Flushes every destination buffer and logs the failures it reports.
+func (batchWriter *BatchWriter) flushAndReportErrors() {
+	if flushError := batchWriter.FlushAll(); flushError != nil {
+		slog.Error("flushing the buffered logs failed", "error", flushError)
+	}
+}
+
 // Flushes every destination buffer without letting one destination's retries stall the others.
-func (batchWriter *BatchWriter) FlushAll() {
+func (batchWriter *BatchWriter) FlushAll() error {
 	var waitGroup sync.WaitGroup
+	var flushError error
+	var flushErrorMutex sync.Mutex
 	for destination := range batchWriter.buffers {
 		waitGroup.Add(1)
 		go func(destinationValue model.Destination) {
 			defer waitGroup.Done()
-			batchWriter.flushDestination(destinationValue)
+			destinationFlushError := batchWriter.flushDestination(destinationValue)
+			if destinationFlushError == nil {
+				return
+			}
+			flushErrorMutex.Lock()
+			flushError = errors.Join(flushError, destinationFlushError)
+			flushErrorMutex.Unlock()
 		}(destination)
 	}
 	waitGroup.Wait()
+	return flushError
 }
 
 // Writes the pending logs for one destination, waiting for any in-flight flush to finish first.
