@@ -125,11 +125,11 @@ Two values are derived at snapshot time rather than stored:
 
 All counters are in memory and reset when the process restarts.
 
-`GET /metrics` serves the full snapshot as JSON and refreshes `queue_backlog` on every request: the three `queue_service*` queues are summed from the RabbitMQ management API (`RABBITMQ_MGMT_URL/api/queues`, bounded by `METRICS_BACKLOG_TIMEOUT`, default `2s`). If the URL is unset or the API fails, a warning is logged and a local fallback counter — defined as messages published minus messages stored, floored at zero — is reported instead. The response shape is documented in [`docs/api.md`](docs/api.md).
+`GET /metrics` serves a human-readable metrics page: every counter is shown as a plain number, with the logs grouped by level and by service, refreshed every five seconds. `GET /metrics.json` serves the same snapshot as JSON and refreshes `queue_backlog` on every request: the three `queue_service*` queues are summed from the RabbitMQ management API (`RABBITMQ_MGMT_URL/api/queues`, bounded by `METRICS_BACKLOG_TIMEOUT`, default `2s`). If the URL is unset or the API fails, a warning is logged and a local fallback counter — defined as messages published minus messages stored, floored at zero — is reported instead. The response shape is documented in [`docs/api.md`](docs/api.md).
 
 ## Dashboard
 
-`GET /dashboard` shows total logs, logs per second, error rate, queue backlog and the top five services by volume as plain numbers, refreshed every five seconds by polling `GET /metrics`. Throughput and error-rate history are kept client-side in the page and drawn with Chart.js 4.6.1, vendored at `internal/dashboard/static/js/chart.umd.js` and embedded — the page never loads a CDN and renders fully offline.
+`GET /dashboard` shows total logs, logs per second, error rate, queue backlog and the top five services by volume as plain numbers, refreshed every five seconds by polling `GET /metrics.json`. Throughput and error-rate history are kept client-side in the page and drawn with Chart.js 4.6.1, vendored at `internal/dashboard/static/js/chart.umd.js` and embedded — the page never loads a CDN and renders fully offline.
 
 Typography is Space Grotesk, vendored as woff2 subsets under `internal/dashboard/static/fonts` together with its SIL Open Font License. It is the only font the pages use — sans-serif and monospace text alike — and no font is fetched from a CDN.
 

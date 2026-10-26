@@ -103,14 +103,23 @@ An entry may have multiple field errors when more than one field fails validatio
 
 ## GET /metrics
 
+Serves the metrics page: an HTML view of every runtime counter as plain numbers, with the accepted logs grouped by level and by service. The page polls `GET /metrics.json` every five seconds and renders the snapshot it receives; it never fails with a non-200 status.
+
+### Responses
+
+| Status | Situation      | Body shape |
+|--------|----------------|------------|
+| 200    | `GET /metrics` | The metrics page (`text/html`) |
+
+## GET /metrics.json
+
 Returns a snapshot of the service's runtime metrics as JSON. The endpoint never authenticates, never fails with a non-200 status for metric reasons, and refreshes `queue_backlog` on every request.
 
 ### Responses
 
-| Status | Situation                  | Body shape                                  |
-|--------|----------------------------|---------------------------------------------|
-| 200    | `GET /metrics`             | `MetricsSnapshot`                           |
-| 200    | Any other method           | Plain text `log ingestion engine` from the catch-all root handler (`/` is registered for every unmatched path and method) |
+| Status | Situation          | Body shape         |
+|--------|--------------------|--------------------|
+| 200    | `GET /metrics.json`| `MetricsSnapshot`  |
 
 ### Response shape
 
@@ -144,6 +153,6 @@ Returns a snapshot of the service's runtime metrics as JSON. The endpoint never 
 
 ### queue_backlog sourcing
 
-On each `GET /metrics` request the service queries the RabbitMQ management API (`GET {RABBITMQ_MGMT_URL}/api/queues`, basic auth, bounded by `METRICS_BACKLOG_TIMEOUT`) and sums the `messages` field across `queue_service1`, `queue_service2` and `queue_service3`, ignoring any other queue on the broker.
+On each `GET /metrics.json` request the service queries the RabbitMQ management API (`GET {RABBITMQ_MGMT_URL}/api/queues`, basic auth, bounded by `METRICS_BACKLOG_TIMEOUT`) and sums the `messages` field across `queue_service1`, `queue_service2` and `queue_service3`, ignoring any other queue on the broker.
 
 When the management API URL is not configured, unreachable, or rejects the request, the service logs a warning and reports a local fallback counter instead: an in-process estimate defined as messages published minus messages stored (`RecordQueueMessagePublished` / `RecordQueueMessageStored`), floored at zero. The fallback value is intentionally not part of the snapshot; only `queue_backlog` carries the effective value.
