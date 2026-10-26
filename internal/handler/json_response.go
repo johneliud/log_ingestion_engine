@@ -23,6 +23,6 @@ func writeJSONResponse(responseWriter http.ResponseWriter, statusCode int, respo
 }
 
 // Writes an error response with the given status code and message.
-func writeJSONError(responseWriter http.ResponseWriter, statusCode int, errorMessage string) {
+func WriteJSONError(responseWriter http.ResponseWriter, statusCode int, errorMessage string) {
 	writeJSONResponse(responseWriter, statusCode, model.ErrorResponse{Error: errorMessage})
 }
