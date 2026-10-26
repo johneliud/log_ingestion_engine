@@ -61,7 +61,7 @@ flowchart LR
     replay -.->|"replay"| sqlite
 ```
 
-Clients pass through the rate limiter to `POST /logs`, where the batch is validated and pushed into the bounded `raw_logs` channel. Pipeline workers enrich and route each log before the publisher sends it to RabbitMQ; if publishing fails, the log enters the bounded fallback instead.
+Clients pass through the rate limiter to `POST /logs`, where the batch is validated and pushed into the bounded `raw_logs` channel. Pipeline workers enrich and route each log before the publisher sends it to RabbitMQ. If publishing fails, the log enters the bounded fallback instead.
 
 A consumer supervisor keeps one broker connection for the per-destination consumers and replaces it with backoff when a subscription ends. Consumers write through the retrying batch writer into one SQLite database per destination, and logs whose retries are exhausted go to the shared dead-letter file for later replay.
 
