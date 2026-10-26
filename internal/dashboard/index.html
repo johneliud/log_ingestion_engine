@@ -47,11 +47,31 @@
             <section class="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <article class="rounded-xl bg-slate-50 p-4">
                     <h2 class="text-sm text-slate-500">Logs per second over time</h2>
-                    <canvas id="throughput-chart" class="mt-2 h-64 w-full"></canvas>
+                    <canvas id="throughput-chart" class="mt-2 h-64 w-full" role="img" aria-label="Logs per second over time, drawn as a line chart"></canvas>
+                    <table class="sr-only">
+                        <caption>Logs per second over time</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">Time</th>
+                                <th scope="col">Logs per second</th>
+                            </tr>
+                        </thead>
+                        <tbody id="throughput-chart-table"></tbody>
+                    </table>
                 </article>
                 <article class="rounded-xl bg-slate-50 p-4">
                     <h2 class="text-sm text-slate-500">Error rate over time</h2>
-                    <canvas id="error-rate-chart" class="mt-2 h-64 w-full"></canvas>
+                    <canvas id="error-rate-chart" class="mt-2 h-64 w-full" role="img" aria-label="Error rate over time, drawn as a line chart"></canvas>
+                    <table class="sr-only">
+                        <caption>Error rate over time</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">Time</th>
+                                <th scope="col">Error rate</th>
+                            </tr>
+                        </thead>
+                        <tbody id="error-rate-chart-table"></tbody>
+                    </table>
                 </article>
                 <article class="rounded-xl bg-slate-50 p-4 lg:col-span-2">
                     <h2 class="text-sm text-slate-500">Top five services by volume</h2>
