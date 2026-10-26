@@ -222,3 +222,22 @@ func TestMetrics_DefaultCurrentTimeProviderIsUsed(t *testing.T) {
 		t.Errorf("TotalLogsReceived = %d, want 1", snapshot.TotalLogsReceived)
 	}
 }
+
+func TestMetrics_FallbackQueueBacklogCounterTracksPublishedMinusStored(t *testing.T) {
+	t.Parallel()
+
+	metricsRegistry := NewMetrics(time.Minute, nil)
+	metricsRegistry.RecordQueueMessageStored()
+	metricsRegistry.RecordQueueMessageStored()
+	if fallbackBacklog := metricsRegistry.FallbackQueueBacklog(); fallbackBacklog != 0 {
+		t.Errorf("fallback backlog = %d, want 0; the counter must not fall below zero", fallbackBacklog)
+	}
+
+	for range 4 {
+		metricsRegistry.RecordQueueMessagePublished()
+	}
+	metricsRegistry.RecordQueueMessageStored()
+	if fallbackBacklog := metricsRegistry.FallbackQueueBacklog(); fallbackBacklog != 3 {
+		t.Errorf("fallback backlog = %d, want 3 (four published minus one stored)", fallbackBacklog)
+	}
+}

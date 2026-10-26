@@ -36,6 +36,7 @@ type Metrics struct {
 	deadLetteredLogs      uint64
 	writeFailures         uint64
 	queueBacklog          int
+	fallbackQueueBacklog  int
 	throughputWindow      time.Duration
 	throughputWindowLogs  uint64
 	lastThroughputTime    time.Time
@@ -106,6 +107,29 @@ func (metrics *Metrics) SetQueueBacklog(backlog int) {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
 	metrics.queueBacklog = backlog
+}
+
+// Records one message published to a RabbitMQ queue, raising the fallback backlog estimate.
+func (metrics *Metrics) RecordQueueMessagePublished() {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	metrics.fallbackQueueBacklog++
+}
+
+// Records one queue message stored by a consumer, lowering the fallback backlog estimate.
+func (metrics *Metrics) RecordQueueMessageStored() {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+	if metrics.fallbackQueueBacklog > 0 {
+		metrics.fallbackQueueBacklog--
+	}
+}
+
+// Returns the local backlog estimate reported when the management API cannot be reached.
+func (metrics *Metrics) FallbackQueueBacklog() int {
+	metrics.mutex.RLock()
+	defer metrics.mutex.RUnlock()
+	return metrics.fallbackQueueBacklog
 }
 
 // Returns an immutable copy of every metric with error rate and throughput already computed.
