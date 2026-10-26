@@ -69,6 +69,10 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("RabbitMQManagementURL = %q, want the empty default", applicationConfiguration.RabbitMQManagementURL)
 	}
 
+	if len(applicationConfiguration.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies = %v, want no entries", applicationConfiguration.TrustedProxies)
+	}
+
 	if applicationConfiguration.PublishTimeout != defaultPublishTimeout {
 		t.Errorf("PublishTimeout = %s, want %s", applicationConfiguration.PublishTimeout, defaultPublishTimeout)
 	}
@@ -408,6 +412,13 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 			},
 			expectedErrorSubstrings: []string{"CONSUMER_BATCH_SIZE", "must not exceed", "RAW_LOGS_BUFFER"},
 		},
+		{
+			name: "trusted proxies contains an invalid cidr prefix",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameTrustedProxies] = "10.0.0.0/8,not-a-prefix"
+			},
+			expectedErrorSubstrings: []string{"TRUSTED_PROXIES", "not a valid CIDR prefix"},
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -425,6 +436,26 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 				}
 			}
 		})
+	}
+}
+
+func TestNewApplicationConfigurationFromEnvironment_ParsesTrustedProxyPrefixes(t *testing.T) {
+	t.Parallel()
+	environmentVariables := aValidMinimalEnvironment(t)
+	environmentVariables[environmentNameTrustedProxies] = "10.0.0.0/8, 192.168.0.0/16"
+	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
+	if configurationError != nil {
+		t.Fatalf("expected the trusted proxies to be valid, got error: %v", configurationError)
+	}
+
+	expectedTrustedProxies := []string{"10.0.0.0/8", "192.168.0.0/16"}
+	if len(applicationConfiguration.TrustedProxies) != len(expectedTrustedProxies) {
+		t.Fatalf("TrustedProxies has %d entries, want %d", len(applicationConfiguration.TrustedProxies), len(expectedTrustedProxies))
+	}
+	for trustedProxyIndex, expectedTrustedProxy := range expectedTrustedProxies {
+		if applicationConfiguration.TrustedProxies[trustedProxyIndex] != expectedTrustedProxy {
+			t.Errorf("TrustedProxies[%d] = %q, want %q", trustedProxyIndex, applicationConfiguration.TrustedProxies[trustedProxyIndex], expectedTrustedProxy)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ const (
 	environmentNameApplicationEnvironment            = "APP_ENV"
 	environmentNameRoutingConfigurationFilePath      = "ROUTING_CONFIG_PATH"
 	environmentNameDefaultDestination                = "DEFAULT_DESTINATION"
+	environmentNameTrustedProxies                    = "TRUSTED_PROXIES"
 	environmentNameRabbitMQHost                      = "RABBITMQ_HOST"
 	environmentNameRabbitMQPort                      = "RABBITMQ_PORT"
 	environmentNameRabbitMQUsername                  = "RABBITMQ_USER"
@@ -98,6 +100,7 @@ type ApplicationConfiguration struct {
 	ApplicationEnvironment           string
 	RoutingConfigurationFilePath     string
 	DefaultDestination               string
+	TrustedProxies                   []string
 	RabbitMQHost                     string
 	RabbitMQPort                     int
 	RabbitMQUsername                 string
@@ -200,6 +203,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, defaultDestinationError
 	}
 	applicationConfiguration.DefaultDestination = defaultDestination
+
+	trustedProxies, trustedProxiesError := parseCIDRListSetting(environmentVariables, environmentNameTrustedProxies)
+	if trustedProxiesError != nil {
+		return ApplicationConfiguration{}, trustedProxiesError
+	}
+	applicationConfiguration.TrustedProxies = trustedProxies
 
 	rabbitMQHost, rabbitMQHostError := parseRequiredStringSetting(environmentVariables, environmentNameRabbitMQHost)
 	if rabbitMQHostError != nil {
@@ -413,6 +422,25 @@ func parseRequiredStringSetting(environmentVariables map[string]string, settingN
 		return "", fmt.Errorf("%w: %s", errMissingRequiredSetting, settingName)
 	}
 	return settingValue, nil
+}
+
+// Parses the comma-separated CIDR prefixes used as trusted proxies.
+func parseCIDRListSetting(environmentVariables map[string]string, settingName string) ([]string, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return nil, nil
+	}
+
+	rawSettingValues := strings.Split(rawSettingValue, ",")
+	parsedSettingValues := make([]string, 0, len(rawSettingValues))
+	for _, rawSettingEntry := range rawSettingValues {
+		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
+		if _, parseError := netip.ParsePrefix(trimmedSettingEntry); parseError != nil {
+			return nil, fmt.Errorf("environment variable %s contains value %q, which is not a valid CIDR prefix: %w", settingName, trimmedSettingEntry, parseError)
+		}
+		parsedSettingValues = append(parsedSettingValues, trimmedSettingEntry)
+	}
+	return parsedSettingValues, nil
 }
 
 // Returns the string for the setting, falling back to the default when missing or empty.
