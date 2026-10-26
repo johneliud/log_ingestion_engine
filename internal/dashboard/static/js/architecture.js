@@ -34,7 +34,12 @@ function showDiagramStatus(statusMessage) {
 
 // Loads and renders the architecture diagram once the page scripts run.
 async function startArchitectureDiagram() {
-    mermaid.initialize({ startOnLoad: false, theme: "neutral", flowchart: { useMaxWidth: false } });
+    mermaid.initialize({
+        startOnLoad: false,
+        theme: "neutral",
+        themeVariables: { fontFamily: "Space Grotesk" },
+        flowchart: { useMaxWidth: false },
+    });
     const diagramSource = await fetchArchitectureDiagramSource();
     if (diagramSource === null) {
         showDiagramStatus("the architecture diagram could not be loaded");
