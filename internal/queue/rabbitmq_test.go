@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -160,6 +161,105 @@ func TestPublisher_ReconnectLoopUsesEachConfiguredBackoffDelay(t *testing.T) {
 
 	cancel()
 	waitForReconnectCompletion(t, completed)
+}
+
+// Counts the messages the publisher sent to the broker or the fallback.
+type recordingPublishMetricsRecorder struct {
+	mutex          sync.Mutex
+	publishedCount int
+}
+
+// Counts one published message.
+func (recordingRecorder *recordingPublishMetricsRecorder) RecordQueueMessagePublished() {
+	recordingRecorder.mutex.Lock()
+	defer recordingRecorder.mutex.Unlock()
+	recordingRecorder.publishedCount++
+}
+
+// Returns the number of counted published messages.
+func (recordingRecorder *recordingPublishMetricsRecorder) publishedMessageCount() int {
+	recordingRecorder.mutex.Lock()
+	defer recordingRecorder.mutex.Unlock()
+	return recordingRecorder.publishedCount
+}
+
+func TestPublisher_CountsMessagesSentToTheBrokerAndToTheFallback(t *testing.T) {
+	t.Parallel()
+
+	recordingRecorder := &recordingPublishMetricsRecorder{}
+	publisher := NewPublisher(config.ApplicationConfiguration{PublishTimeout: time.Second}, 10, WithPublishedMessageRecorder(recordingRecorder))
+	publisher.mutex.Lock()
+	publisher.isConnected = true
+	publisher.mutex.Unlock()
+	publisher.publishOperation = func(enrichedLog model.EnrichedLog) error {
+		return nil
+	}
+
+	if publishError := publisher.Publish(aQueueTestEnrichedLog("batch-broker")); publishError != nil {
+		t.Fatalf("expected the broker to accept the log, got error: %v", publishError)
+	}
+
+	publisher.mutex.Lock()
+	publisher.isConnected = false
+	publisher.mutex.Unlock()
+
+	if publishError := publisher.Publish(aQueueTestEnrichedLog("batch-fallback")); publishError != nil {
+		t.Fatalf("expected the log to enter the fallback, got error: %v", publishError)
+	}
+
+	if recordingRecorder.publishedMessageCount() != 2 {
+		t.Errorf("published message count = %d, want 2", recordingRecorder.publishedMessageCount())
+	}
+}
+
+func TestPublisher_DoesNotCountAMessageWhenTheFallbackIsFull(t *testing.T) {
+	t.Parallel()
+
+	recordingRecorder := &recordingPublishMetricsRecorder{}
+	publisher := NewPublisher(config.ApplicationConfiguration{PublishTimeout: time.Second}, 1, WithPublishedMessageRecorder(recordingRecorder))
+	publisher.mutex.Lock()
+	publisher.isConnected = false
+	publisher.mutex.Unlock()
+
+	if publishError := publisher.Publish(aQueueTestEnrichedLog("batch-full-1")); publishError != nil {
+		t.Fatalf("expected the first log to enter the fallback, got error: %v", publishError)
+	}
+	if publishError := publisher.Publish(aQueueTestEnrichedLog("batch-full-2")); !errors.Is(publishError, ErrFallbackFull) {
+		t.Fatalf("second publish error = %v, want %v", publishError, ErrFallbackFull)
+	}
+
+	if recordingRecorder.publishedMessageCount() != 1 {
+		t.Errorf("published message count = %d, want 1", recordingRecorder.publishedMessageCount())
+	}
+}
+
+func TestVirtualHostPaths_EscapesTheDefaultAndNamedVirtualHosts(t *testing.T) {
+	t.Parallel()
+
+	virtualHostCases := []struct {
+		name                string
+		rabbitMQVirtualHost string
+		expectedPath        string
+		expectedRawPath     string
+	}{
+		{name: "the default virtual host", rabbitMQVirtualHost: "", expectedPath: "//", expectedRawPath: "/%2F"},
+		{name: "a named virtual host", rabbitMQVirtualHost: "log-engine", expectedPath: "/log-engine", expectedRawPath: "/log-engine"},
+		{name: "a virtual host with a space", rabbitMQVirtualHost: "log engine", expectedPath: "/log engine", expectedRawPath: "/log%20engine"},
+	}
+
+	for _, virtualHostCase := range virtualHostCases {
+		t.Run(virtualHostCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			virtualHostPath, virtualHostRawPath := virtualHostPaths(virtualHostCase.rabbitMQVirtualHost)
+			if virtualHostPath != virtualHostCase.expectedPath {
+				t.Errorf("virtual host path = %q, want %q", virtualHostPath, virtualHostCase.expectedPath)
+			}
+			if virtualHostRawPath != virtualHostCase.expectedRawPath {
+				t.Errorf("virtual host raw path = %q, want %q", virtualHostRawPath, virtualHostCase.expectedRawPath)
+			}
+		})
+	}
 }
 
 func TestReconnectDelayAt_ReusesTheLastConfiguredDelay(t *testing.T) {

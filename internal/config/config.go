@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -20,11 +21,13 @@ const (
 	environmentNameApplicationEnvironment            = "APP_ENV"
 	environmentNameRoutingConfigurationFilePath      = "ROUTING_CONFIG_PATH"
 	environmentNameDefaultDestination                = "DEFAULT_DESTINATION"
+	environmentNameTrustedProxies                    = "TRUSTED_PROXIES"
 	environmentNameRabbitMQHost                      = "RABBITMQ_HOST"
 	environmentNameRabbitMQPort                      = "RABBITMQ_PORT"
 	environmentNameRabbitMQUsername                  = "RABBITMQ_USER"
 	environmentNameRabbitMQPassword                  = "RABBITMQ_PASS"
 	environmentNameRabbitMQManagementURL             = "RABBITMQ_MGMT_URL"
+	environmentNameRabbitMQVirtualHost               = "RABBITMQ_VHOST"
 	environmentNameRabbitMQUseTLS                    = "RABBITMQ_USE_TLS"
 	environmentNamePublishTimeout                    = "PUBLISH_TIMEOUT"
 	environmentNameRabbitMQReconnectBackoffDelayList = "RABBITMQ_RECONNECT_BACKOFFS"
@@ -37,21 +40,25 @@ const (
 	environmentNameWriteRetryBackoffDelayList        = "RETRY_BACKOFFS"
 	environmentNameDeadLetterFilePath                = "DEAD_LETTER_PATH"
 	environmentNameDeadLetterMaximumFileSizeInBytes  = "DEAD_LETTER_MAX_BYTES"
+	environmentNameMetricsThroughputWindow           = "METRICS_THROUGHPUT_WINDOW"
+	environmentNameMetricsBacklogTimeout             = "METRICS_BACKLOG_TIMEOUT"
 )
 
 const (
-	defaultHTTPPort                         = 8080
-	defaultRateLimitPerSecond               = 1000
-	defaultRateLimitCleanupInterval         = time.Minute
-	defaultRawLogsBufferSize                = 10000
-	defaultConsumerBatchSize                = 50
-	defaultChannelSendTimeout               = 100 * time.Millisecond
-	defaultMaximumBodySizeInBytes           = 1048576
-	defaultApplicationEnvironment           = "production"
-	defaultRoutingConfigurationFilePath     = "configs/routing.json"
-	service1Destination                     = "service1"
-	defaultPublishTimeout                   = 5 * time.Second
-	defaultRabbitMQUseTLS                   = false
+	defaultHTTPPort                     = 8080
+	defaultRateLimitPerSecond           = 1000
+	defaultRateLimitCleanupInterval     = time.Minute
+	defaultRawLogsBufferSize            = 10000
+	defaultConsumerBatchSize            = 50
+	defaultChannelSendTimeout           = 100 * time.Millisecond
+	defaultMaximumBodySizeInBytes       = 1048576
+	defaultApplicationEnvironment       = "production"
+	defaultRoutingConfigurationFilePath = "configs/routing.json"
+	service1Destination                 = "service1"
+	defaultPublishTimeout               = 5 * time.Second
+	defaultRabbitMQUseTLS               = false
+	// DefaultRabbitMQVirtualHost is the virtual host used when none is configured.
+	DefaultRabbitMQVirtualHost              = "/"
 	defaultPipelineWorkerCount              = 4
 	defaultWriteBatchSize                   = 100
 	defaultWriteFlushInterval               = time.Second
@@ -60,6 +67,8 @@ const (
 	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
+	defaultMetricsThroughputWindow          = time.Minute
+	defaultMetricsBacklogTimeout            = 2 * time.Second
 
 	RoutingKeyLogWrite = "log.write"
 
@@ -94,11 +103,13 @@ type ApplicationConfiguration struct {
 	ApplicationEnvironment           string
 	RoutingConfigurationFilePath     string
 	DefaultDestination               string
+	TrustedProxies                   []string
 	RabbitMQHost                     string
 	RabbitMQPort                     int
 	RabbitMQUsername                 string
 	RabbitMQPassword                 string
 	RabbitMQManagementURL            string
+	RabbitMQVirtualHost              string
 	RabbitMQUseTLS                   bool
 	PublishTimeout                   time.Duration
 	RabbitMQReconnectBackoffDelays   []time.Duration
@@ -110,6 +121,8 @@ type ApplicationConfiguration struct {
 	WriteRetryBackoffDelays          []time.Duration
 	DeadLetterFilePath               string
 	DeadLetterMaximumFileSizeInBytes int
+	MetricsThroughputWindow          time.Duration
+	MetricsBacklogTimeout            time.Duration
 }
 
 // Builds the application configuration from the merged process environment and configuration file, returning an error naming the first invalid setting.
@@ -195,6 +208,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.DefaultDestination = defaultDestination
 
+	trustedProxies, trustedProxiesError := parseCIDRListSetting(environmentVariables, environmentNameTrustedProxies)
+	if trustedProxiesError != nil {
+		return ApplicationConfiguration{}, trustedProxiesError
+	}
+	applicationConfiguration.TrustedProxies = trustedProxies
+
 	rabbitMQHost, rabbitMQHostError := parseRequiredStringSetting(environmentVariables, environmentNameRabbitMQHost)
 	if rabbitMQHostError != nil {
 		return ApplicationConfiguration{}, rabbitMQHostError
@@ -224,6 +243,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, rabbitMQManagementURLError
 	}
 	applicationConfiguration.RabbitMQManagementURL = rabbitMQManagementURL
+
+	rabbitMQVirtualHost, rabbitMQVirtualHostError := parseStringSetting(environmentVariables, environmentNameRabbitMQVirtualHost, DefaultRabbitMQVirtualHost)
+	if rabbitMQVirtualHostError != nil {
+		return ApplicationConfiguration{}, rabbitMQVirtualHostError
+	}
+	applicationConfiguration.RabbitMQVirtualHost = rabbitMQVirtualHost
 
 	rabbitMQUseTLS, rabbitMQUseTLSError := parseBooleanSetting(environmentVariables, environmentNameRabbitMQUseTLS, defaultRabbitMQUseTLS)
 	if rabbitMQUseTLSError != nil {
@@ -290,6 +315,18 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, deadLetterMaximumFileSizeInBytesError
 	}
 	applicationConfiguration.DeadLetterMaximumFileSizeInBytes = deadLetterMaximumFileSizeInBytes
+
+	metricsThroughputWindow, metricsThroughputWindowError := parsePositiveDurationSetting(environmentVariables, environmentNameMetricsThroughputWindow, defaultMetricsThroughputWindow)
+	if metricsThroughputWindowError != nil {
+		return ApplicationConfiguration{}, metricsThroughputWindowError
+	}
+	applicationConfiguration.MetricsThroughputWindow = metricsThroughputWindow
+
+	metricsBacklogTimeout, metricsBacklogTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNameMetricsBacklogTimeout, defaultMetricsBacklogTimeout)
+	if metricsBacklogTimeoutError != nil {
+		return ApplicationConfiguration{}, metricsBacklogTimeoutError
+	}
+	applicationConfiguration.MetricsBacklogTimeout = metricsBacklogTimeout
 
 	validationError := validateConsumerBatchFitsBuffer(applicationConfiguration)
 	if validationError != nil {
@@ -395,6 +432,25 @@ func parseRequiredStringSetting(environmentVariables map[string]string, settingN
 		return "", fmt.Errorf("%w: %s", errMissingRequiredSetting, settingName)
 	}
 	return settingValue, nil
+}
+
+// Parses the comma-separated CIDR prefixes used as trusted proxies.
+func parseCIDRListSetting(environmentVariables map[string]string, settingName string) ([]string, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return nil, nil
+	}
+
+	rawSettingValues := strings.Split(rawSettingValue, ",")
+	parsedSettingValues := make([]string, 0, len(rawSettingValues))
+	for _, rawSettingEntry := range rawSettingValues {
+		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
+		if _, parseError := netip.ParsePrefix(trimmedSettingEntry); parseError != nil {
+			return nil, fmt.Errorf("environment variable %s contains value %q, which is not a valid CIDR prefix: %w", settingName, trimmedSettingEntry, parseError)
+		}
+		parsedSettingValues = append(parsedSettingValues, trimmedSettingEntry)
+	}
+	return parsedSettingValues, nil
 }
 
 // Returns the string for the setting, falling back to the default when missing or empty.

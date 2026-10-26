@@ -1,4 +1,4 @@
-package ingest
+package handler
 
 import (
 	"encoding/json"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/johneliud/log_ingestion_engine/internal/ingest"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 	"github.com/johneliud/log_ingestion_engine/internal/pipeline"
 )
@@ -18,6 +19,11 @@ const applicationJSONMediaType = "application/json"
 
 type rawLogPusher interface {
 	PushBatch([]model.RawLog) error
+}
+
+// Counts the log entries accepted by the ingestion handler.
+type ingestionMetricsRecorder interface {
+	RecordLogsReceived(logs []model.LogEntry)
 }
 
 // Returns an HTTP handler that validates a JSON array of log entries and responds with a batch identifier plus any per-entry rejection details.
@@ -36,7 +42,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 	return func(responseWriter http.ResponseWriter, request *http.Request) {
 		mediaType, _, parseError := mime.ParseMediaType(request.Header.Get("Content-Type"))
 		if parseError != nil || mediaType != applicationJSONMediaType {
-			writeJSONError(responseWriter, http.StatusUnsupportedMediaType, "content type must be application/json")
+			WriteJSONError(responseWriter, http.StatusUnsupportedMediaType, "content type must be application/json")
 			return
 		}
 
@@ -44,30 +50,30 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 		requestBody, readError := io.ReadAll(request.Body)
 		if readError != nil {
 			if _, isMaxBytesError := errors.AsType[*http.MaxBytesError](readError); isMaxBytesError {
-				writeJSONError(responseWriter, http.StatusRequestEntityTooLarge, "request body exceeds the maximum allowed size")
+				WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "request body exceeds the maximum allowed size")
 				return
 			}
-			writeJSONError(responseWriter, http.StatusBadRequest, "could not read the request body")
+			WriteJSONError(responseWriter, http.StatusBadRequest, "could not read the request body")
 			return
 		}
 
 		if len(requestBody) == 0 {
-			writeJSONError(responseWriter, http.StatusBadRequest, "request body is empty")
+			WriteJSONError(responseWriter, http.StatusBadRequest, "request body is empty")
 			return
 		}
 
 		var logEntries []model.LogEntry
 		if jsonError := json.Unmarshal(requestBody, &logEntries); jsonError != nil {
-			writeJSONError(responseWriter, http.StatusBadRequest, fmt.Sprintf("malformed JSON: %s", jsonError.Error()))
+			WriteJSONError(responseWriter, http.StatusBadRequest, fmt.Sprintf("malformed JSON: %s", jsonError.Error()))
 			return
 		}
 
 		if logEntries == nil {
-			writeJSONError(responseWriter, http.StatusBadRequest, "request body must be a JSON array")
+			WriteJSONError(responseWriter, http.StatusBadRequest, "request body must be a JSON array")
 			return
 		}
 
-		validEntries, rejectedEntries := validateLogEntries(logEntries)
+		validEntries, rejectedEntries := ingest.ValidateLogEntries(logEntries)
 
 		if len(logEntries) > 0 && len(validEntries) == 0 {
 			writeJSONResponse(responseWriter, http.StatusBadRequest, model.AllEntriesRejectedResponse{
@@ -78,7 +84,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 		}
 
 		if handlerConfiguration.rawLogPusher != nil && len(validEntries) > 0 {
-			sourceIP := ResolveClientIP(request, handlerConfiguration.trustedProxies)
+			sourceIP := ingest.ResolveClientIP(request, handlerConfiguration.trustedProxies)
 			receivedAt := handlerConfiguration.currentTimeProvider()
 			batchID := uuid.NewString()
 			rawLogs := make([]model.RawLog, 0, len(validEntries))
@@ -94,12 +100,13 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 
 			if pushError := handlerConfiguration.rawLogPusher.PushBatch(rawLogs); pushError != nil {
 				if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
-					writeJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
+					WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
 					return
 				}
-				writeJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
+				WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
 				return
 			}
+			handlerConfiguration.recordLogsReceived(validEntries)
 			writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
 				Status:   "accepted",
 				BatchID:  batchID,
@@ -108,6 +115,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 			return
 		}
 
+		handlerConfiguration.recordLogsReceived(validEntries)
 		batchID := uuid.NewString()
 		writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
 			Status:   "accepted",
@@ -122,6 +130,15 @@ type logIngestionHandlerConfiguration struct {
 	rawLogPusher           rawLogPusher
 	currentTimeProvider    func() time.Time
 	trustedProxies         []string
+	metricsRecorder        ingestionMetricsRecorder
+}
+
+// Counts the accepted log entries when a metrics recorder is configured.
+func (configuration *logIngestionHandlerConfiguration) recordLogsReceived(validEntries []model.LogEntry) {
+	if configuration.metricsRecorder == nil || len(validEntries) == 0 {
+		return
+	}
+	configuration.metricsRecorder.RecordLogsReceived(validEntries)
 }
 
 // LogIngestionHandlerOption configures the log ingestion handler.
@@ -147,5 +164,12 @@ func WithCurrentTimeProviderForIngestion(currentTimeProvider func() time.Time) L
 func WithTrustedProxies(trustedProxies []string) LogIngestionHandlerOption {
 	return func(configuration *logIngestionHandlerConfiguration) {
 		configuration.trustedProxies = trustedProxies
+	}
+}
+
+// WithIngestionMetricsRecorder configures the recorder that counts accepted log entries.
+func WithIngestionMetricsRecorder(metricsRecorder ingestionMetricsRecorder) LogIngestionHandlerOption {
+	return func(configuration *logIngestionHandlerConfiguration) {
+		configuration.metricsRecorder = metricsRecorder
 	}
 }

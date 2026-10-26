@@ -69,6 +69,14 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("RabbitMQManagementURL = %q, want the empty default", applicationConfiguration.RabbitMQManagementURL)
 	}
 
+	if len(applicationConfiguration.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies = %v, want no entries", applicationConfiguration.TrustedProxies)
+	}
+
+	if applicationConfiguration.RabbitMQVirtualHost != DefaultRabbitMQVirtualHost {
+		t.Errorf("RabbitMQVirtualHost = %q, want %q", applicationConfiguration.RabbitMQVirtualHost, DefaultRabbitMQVirtualHost)
+	}
+
 	if applicationConfiguration.PublishTimeout != defaultPublishTimeout {
 		t.Errorf("PublishTimeout = %s, want %s", applicationConfiguration.PublishTimeout, defaultPublishTimeout)
 	}
@@ -113,6 +121,14 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("DeadLetterMaximumFileSizeInBytes = %d, want %d", applicationConfiguration.DeadLetterMaximumFileSizeInBytes, defaultDeadLetterMaximumFileSizeInBytes)
 	}
 
+	if applicationConfiguration.MetricsThroughputWindow != defaultMetricsThroughputWindow {
+		t.Errorf("MetricsThroughputWindow = %s, want %s", applicationConfiguration.MetricsThroughputWindow, defaultMetricsThroughputWindow)
+	}
+
+	if applicationConfiguration.MetricsBacklogTimeout != defaultMetricsBacklogTimeout {
+		t.Errorf("MetricsBacklogTimeout = %s, want %s", applicationConfiguration.MetricsBacklogTimeout, defaultMetricsBacklogTimeout)
+	}
+
 	expectedRetryBackoffDelays := []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
 
 	for retryBackoffDelayIndex, expectedRetryBackoffDelay := range expectedRetryBackoffDelays {
@@ -148,6 +164,8 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameWriteRetryBackoffDelayList] = "500ms, 2s, 4s, 8s"
 	environmentVariables[environmentNameDeadLetterFilePath] = "failed/letters.jsonl"
 	environmentVariables[environmentNameDeadLetterMaximumFileSizeInBytes] = "20971520"
+	environmentVariables[environmentNameMetricsThroughputWindow] = "30s"
+	environmentVariables[environmentNameMetricsBacklogTimeout] = "750ms"
 	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 
 	if configurationError != nil {
@@ -260,6 +278,14 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 
 	if applicationConfiguration.DeadLetterMaximumFileSizeInBytes != 20971520 {
 		t.Errorf("DeadLetterMaximumFileSizeInBytes = %d, want 20971520", applicationConfiguration.DeadLetterMaximumFileSizeInBytes)
+	}
+
+	if applicationConfiguration.MetricsThroughputWindow != 30*time.Second {
+		t.Errorf("MetricsThroughputWindow = %s, want 30s", applicationConfiguration.MetricsThroughputWindow)
+	}
+
+	if applicationConfiguration.MetricsBacklogTimeout != 750*time.Millisecond {
+		t.Errorf("MetricsBacklogTimeout = %s, want 750ms", applicationConfiguration.MetricsBacklogTimeout)
 	}
 }
 
@@ -390,6 +416,13 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 			},
 			expectedErrorSubstrings: []string{"CONSUMER_BATCH_SIZE", "must not exceed", "RAW_LOGS_BUFFER"},
 		},
+		{
+			name: "trusted proxies contains an invalid cidr prefix",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameTrustedProxies] = "10.0.0.0/8,not-a-prefix"
+			},
+			expectedErrorSubstrings: []string{"TRUSTED_PROXIES", "not a valid CIDR prefix"},
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -407,6 +440,40 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 				}
 			}
 		})
+	}
+}
+
+func TestNewApplicationConfigurationFromEnvironment_ParsesTrustedProxyPrefixes(t *testing.T) {
+	t.Parallel()
+	environmentVariables := aValidMinimalEnvironment(t)
+	environmentVariables[environmentNameTrustedProxies] = "10.0.0.0/8, 192.168.0.0/16"
+	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
+	if configurationError != nil {
+		t.Fatalf("expected the trusted proxies to be valid, got error: %v", configurationError)
+	}
+
+	expectedTrustedProxies := []string{"10.0.0.0/8", "192.168.0.0/16"}
+	if len(applicationConfiguration.TrustedProxies) != len(expectedTrustedProxies) {
+		t.Fatalf("TrustedProxies has %d entries, want %d", len(applicationConfiguration.TrustedProxies), len(expectedTrustedProxies))
+	}
+	for trustedProxyIndex, expectedTrustedProxy := range expectedTrustedProxies {
+		if applicationConfiguration.TrustedProxies[trustedProxyIndex] != expectedTrustedProxy {
+			t.Errorf("TrustedProxies[%d] = %q, want %q", trustedProxyIndex, applicationConfiguration.TrustedProxies[trustedProxyIndex], expectedTrustedProxy)
+		}
+	}
+}
+
+func TestNewApplicationConfigurationFromEnvironment_ParsesTheConfiguredRabbitMQVirtualHost(t *testing.T) {
+	t.Parallel()
+	environmentVariables := aValidMinimalEnvironment(t)
+	environmentVariables[environmentNameRabbitMQVirtualHost] = "log-engine"
+	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
+	if configurationError != nil {
+		t.Fatalf("expected the virtual host to be valid, got error: %v", configurationError)
+	}
+
+	if applicationConfiguration.RabbitMQVirtualHost != "log-engine" {
+		t.Errorf("RabbitMQVirtualHost = %q, want %q", applicationConfiguration.RabbitMQVirtualHost, "log-engine")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +56,155 @@ func aRecordingRetryWaiter(recordedDelays chan<- time.Duration) retryWaiter {
 	return func(applicationContext context.Context, retryDelay time.Duration) error {
 		recordedDelays <- retryDelay
 		return nil
+	}
+}
+
+// Counts the stored, failed and dead-lettered logs of a batch writer.
+type recordingStorageMetricsRecorder struct {
+	mutex            sync.Mutex
+	storedLogs       int
+	releasedLogs     int
+	writeFailures    int
+	deadLetteredLogs int
+	recordedEvents   chan string
+}
+
+// Returns a recorder that reports every counted event on its channel.
+func newRecordingStorageMetricsRecorder() *recordingStorageMetricsRecorder {
+	return &recordingStorageMetricsRecorder{recordedEvents: make(chan string, 16)}
+}
+
+// Counts one stored log.
+func (recordingRecorder *recordingStorageMetricsRecorder) RecordQueueMessageStored() {
+	recordingRecorder.mutex.Lock()
+	recordingRecorder.storedLogs++
+	recordingRecorder.mutex.Unlock()
+	recordingRecorder.recordedEvents <- "stored"
+}
+
+// Counts one released log that left the pipeline without being stored.
+func (recordingRecorder *recordingStorageMetricsRecorder) RecordQueueMessageReleased() {
+	recordingRecorder.mutex.Lock()
+	recordingRecorder.releasedLogs++
+	recordingRecorder.mutex.Unlock()
+	recordingRecorder.recordedEvents <- "released"
+}
+
+// Counts one failed write.
+func (recordingRecorder *recordingStorageMetricsRecorder) RecordWriteFailure() {
+	recordingRecorder.mutex.Lock()
+	recordingRecorder.writeFailures++
+	recordingRecorder.mutex.Unlock()
+	recordingRecorder.recordedEvents <- "write failure"
+}
+
+// Counts one dead-lettered log.
+func (recordingRecorder *recordingStorageMetricsRecorder) RecordDeadLetteredLog() {
+	recordingRecorder.mutex.Lock()
+	recordingRecorder.deadLetteredLogs++
+	recordingRecorder.mutex.Unlock()
+	recordingRecorder.recordedEvents <- "dead lettered"
+}
+
+// Returns the counted stored, released, failed and dead-lettered logs.
+func (recordingRecorder *recordingStorageMetricsRecorder) counts() (int, int, int, int) {
+	recordingRecorder.mutex.Lock()
+	defer recordingRecorder.mutex.Unlock()
+	return recordingRecorder.storedLogs, recordingRecorder.releasedLogs, recordingRecorder.writeFailures, recordingRecorder.deadLetteredLogs
+}
+
+// Waits until the recorder counted the expected number of events of one kind.
+func (recordingRecorder *recordingStorageMetricsRecorder) waitForEvents(t *testing.T, eventName string, expectedEventCount int) {
+	t.Helper()
+	seenEventCount := 0
+	for seenEventCount < expectedEventCount {
+		select {
+		case recordedEvent := <-recordingRecorder.recordedEvents:
+			if recordedEvent == eventName {
+				seenEventCount++
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %d %s events, saw %d", expectedEventCount, eventName, seenEventCount)
+		}
+	}
+}
+
+func TestBatchWriter_CountsStoredLogsInTheMetricsRecorder(t *testing.T) {
+	t.Parallel()
+	recordedBatches := make(chan recordedBatch, 1)
+	recordingRecorder := newRecordingStorageMetricsRecorder()
+	batchWriter := NewBatchWriter(BatchWriterDependencies{
+		WriteBatchSize:  2,
+		StoreBatch:      aRecordingBatchStore(recordedBatches),
+		MetricsRecorder: recordingRecorder,
+	})
+
+	if storeError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog(), anEnrichedLog()}); storeError != nil {
+		t.Fatalf("StoreBatch returned error: %v", storeError)
+	}
+
+	select {
+	case <-recordedBatches:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch was not flushed after reaching the size trigger")
+	}
+	recordingRecorder.waitForEvents(t, "stored", 2)
+
+	storedLogs, releasedLogs, writeFailures, deadLetteredLogs := recordingRecorder.counts()
+	if storedLogs != 2 {
+		t.Errorf("stored log count = %d, want 2", storedLogs)
+	}
+	if releasedLogs != 0 {
+		t.Errorf("released log count = %d, want 0", releasedLogs)
+	}
+	if writeFailures != 0 {
+		t.Errorf("write failure count = %d, want 0", writeFailures)
+	}
+	if deadLetteredLogs != 0 {
+		t.Errorf("dead lettered log count = %d, want 0", deadLetteredLogs)
+	}
+}
+
+func TestBatchWriter_CountsFailedWritesAndDeadLetteredLogsInTheMetricsRecorder(t *testing.T) {
+	t.Parallel()
+	attemptedBatches := make(chan []model.EnrichedLog, 1)
+	recordingRecorder := newRecordingStorageMetricsRecorder()
+	deadLetteredEntries := make(chan model.DeadLetterEntry, 1)
+	batchWriter := NewBatchWriter(BatchWriterDependencies{
+		WriteBatchSize:     1,
+		StoreBatch:         aFailingBatchStore(attemptedBatches),
+		RetryBackoffDelays: []time.Duration{},
+		DeadLetterSink: func(deadLetterEntry model.DeadLetterEntry) error {
+			deadLetteredEntries <- deadLetterEntry
+			return nil
+		},
+		MetricsRecorder: recordingRecorder,
+	})
+
+	if storeError := batchWriter.StoreBatch(model.DestinationService1, []model.EnrichedLog{anEnrichedLog()}); storeError != nil {
+		t.Fatalf("StoreBatch returned error: %v", storeError)
+	}
+
+	select {
+	case <-deadLetteredEntries:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the failed log was not dead-lettered")
+	}
+	recordingRecorder.waitForEvents(t, "dead lettered", 1)
+	recordingRecorder.waitForEvents(t, "released", 1)
+
+	storedLogs, releasedLogs, writeFailures, deadLetteredLogs := recordingRecorder.counts()
+	if storedLogs != 0 {
+		t.Errorf("stored log count = %d, want 0", storedLogs)
+	}
+	if releasedLogs != 1 {
+		t.Errorf("released log count = %d, want 1", releasedLogs)
+	}
+	if writeFailures != 1 {
+		t.Errorf("write failure count = %d, want 1", writeFailures)
+	}
+	if deadLetteredLogs != 1 {
+		t.Errorf("dead lettered log count = %d, want 1", deadLetteredLogs)
 	}
 }
 

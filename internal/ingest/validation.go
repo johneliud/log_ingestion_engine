@@ -47,7 +47,7 @@ func validateLogEntry(logEntry model.LogEntry) []model.FieldError {
 }
 
 // Separates valid entries from rejected entries, preserving the original array index for each rejection.
-func validateLogEntries(logEntries []model.LogEntry) (validEntries []model.LogEntry, rejectedEntries []model.RejectedEntry) {
+func ValidateLogEntries(logEntries []model.LogEntry) (validEntries []model.LogEntry, rejectedEntries []model.RejectedEntry) {
 	for entryIndex, logEntry := range logEntries {
 		fieldErrors := validateLogEntry(logEntry)
 		if len(fieldErrors) > 0 {

@@ -163,7 +163,7 @@ func (queueConsumer *QueueConsumer) storeFallbackLog(enrichedLog model.EnrichedL
 	}
 }
 
-// Opens a channel on the connection and consumes one queue without automatic acknowledgements.
+// Opens a channel on the connection and consumes one queue without automatic acknowledgements, leaving the channel close to the caller so no library cancellation goroutine races it.
 func subscribeToRabbitMQQueue(connection *amqp.Connection) queueSubscriber {
 	return func(applicationContext context.Context, queueName string) (<-chan amqp.Delivery, func() error, error) {
 		channel, channelError := connection.Channel()
@@ -176,7 +176,7 @@ func subscribeToRabbitMQQueue(connection *amqp.Connection) queueSubscriber {
 			return nil, nil, qualityOfServiceError
 		}
 
-		deliveries, consumeError := channel.ConsumeWithContext(applicationContext, queueName, "", false, false, false, false, nil)
+		deliveries, consumeError := channel.Consume(queueName, "", false, false, false, false, nil)
 		if consumeError != nil {
 			channel.Close()
 			return nil, nil, consumeError

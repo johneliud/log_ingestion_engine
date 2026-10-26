@@ -30,6 +30,26 @@ type brokerPublishOperation func(enrichedLog model.EnrichedLog) error
 // Waits between reconnect attempts and reports cancellation.
 type reconnectWaiter func(applicationContext context.Context, reconnectDelay time.Duration) error
 
+// Counts the messages handed to the broker or the in-memory fallback.
+type publishMetricsRecorder interface {
+	RecordQueueMessagePublished()
+}
+
+// Holds the optional dependencies of the publisher.
+type publisherConfiguration struct {
+	metricsRecorder publishMetricsRecorder
+}
+
+// PublisherOption configures the publisher.
+type PublisherOption func(*publisherConfiguration)
+
+// WithPublishedMessageRecorder configures the recorder that counts published messages.
+func WithPublishedMessageRecorder(metricsRecorder publishMetricsRecorder) PublisherOption {
+	return func(configuration *publisherConfiguration) {
+		configuration.metricsRecorder = metricsRecorder
+	}
+}
+
 // Publisher publishes enriched logs to RabbitMQ with timeout and fallback.
 type Publisher struct {
 	mutex                    sync.RWMutex
@@ -44,12 +64,19 @@ type Publisher struct {
 	connectOperation         brokerConnectOperation
 	publishOperation         brokerPublishOperation
 	waitForReconnectDelay    reconnectWaiter
+	metricsRecorder          publishMetricsRecorder
 }
 
 // Returns a new publisher.
-func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fallbackCapacity int) *Publisher {
+func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fallbackCapacity int, options ...PublisherOption) *Publisher {
 	if fallbackCapacity <= 0 {
 		fallbackCapacity = 10000
+	}
+	publisherConfiguration := publisherConfiguration{}
+	for _, option := range options {
+		if option != nil {
+			option(&publisherConfiguration)
+		}
 	}
 	publisher := &Publisher{
 		applicationConfiguration: applicationConfiguration,
@@ -58,6 +85,7 @@ func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fall
 		isConnected:              false,
 		returns:                  make(chan amqp.Return, 1),
 		connectionLostChannel:    make(chan struct{}, 1),
+		metricsRecorder:          publisherConfiguration.metricsRecorder,
 	}
 	publisher.connectOperation = publisher.connect
 	publisher.publishOperation = publisher.publishToBroker
@@ -72,18 +100,7 @@ func (publisher *Publisher) Connect() error {
 
 // Connects to RabbitMQ, declares topology and starts watching for connection loss.
 func (publisher *Publisher) connect() error {
-	scheme := "amqp"
-	if publisher.applicationConfiguration.RabbitMQUseTLS {
-		scheme = "amqps"
-	}
-	connectionURL := url.URL{
-		Scheme: scheme,
-		User:   url.UserPassword(publisher.applicationConfiguration.RabbitMQUsername, publisher.applicationConfiguration.RabbitMQPassword),
-		Host:   net.JoinHostPort(publisher.applicationConfiguration.RabbitMQHost, strconv.Itoa(publisher.applicationConfiguration.RabbitMQPort)),
-	}
-	connectionString := connectionURL.String()
-
-	connection, connectionError := amqp.Dial(connectionString)
+	connection, connectionError := DialBroker(publisher.applicationConfiguration)
 	if connectionError != nil {
 		publisher.markDisconnected()
 		slog.Warn("failed to connect to rabbitmq, activating in-memory fallback", "error", connectionError)
@@ -98,7 +115,7 @@ func (publisher *Publisher) connect() error {
 		return channelError
 	}
 
-	if err := publisher.declareTopology(channel); err != nil {
+	if err := DeclareTopology(channel); err != nil {
 		channel.Close()
 		connection.Close()
 		publisher.markDisconnected()
@@ -139,8 +156,8 @@ func (publisher *Publisher) connect() error {
 	return nil
 }
 
-// Declares the exchanges, queues and bindings used by the publisher.
-func (publisher *Publisher) declareTopology(channel *amqp.Channel) error {
+// Declares the exchanges, queues and bindings used by the publisher and the consumers.
+func DeclareTopology(channel *amqp.Channel) error {
 	exchanges := []string{config.ExchangeService1Name, config.ExchangeService2Name, config.ExchangeService3Name}
 	queues := []string{config.QueueService1Name, config.QueueService2Name, config.QueueService3Name}
 
@@ -220,16 +237,34 @@ func (publisher *Publisher) watchConnectionClose(connection *amqp.Connection, ch
 func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
 	if !publisher.IsConnected() {
 		slog.Warn("rabbitmq not connected, using in-memory fallback", "destination", enrichedLog.Destination, "batch_id", enrichedLog.BatchID)
-		return publisher.publishToFallback(enrichedLog)
+		return publisher.publishToFallbackAndRecord(enrichedLog)
 	}
 
 	if publishError := publisher.publishOperation(enrichedLog); publishError != nil {
 		publisher.markDisconnected()
 		slog.Warn("publishing to rabbitmq failed, using in-memory fallback", "error", publishError, "destination", enrichedLog.Destination, "batch_id", enrichedLog.BatchID)
-		return publisher.publishToFallback(enrichedLog)
+		return publisher.publishToFallbackAndRecord(enrichedLog)
 	}
 
+	publisher.recordPublishedMessage()
 	return nil
+}
+
+// Publishes an enriched log to the in-memory fallback and counts it as in flight.
+func (publisher *Publisher) publishToFallbackAndRecord(enrichedLog model.EnrichedLog) error {
+	if fallbackError := publisher.publishToFallback(enrichedLog); fallbackError != nil {
+		return fallbackError
+	}
+	publisher.recordPublishedMessage()
+	return nil
+}
+
+// Counts one message that is now waiting to be stored.
+func (publisher *Publisher) recordPublishedMessage() {
+	if publisher.metricsRecorder == nil {
+		return
+	}
+	publisher.metricsRecorder.RecordQueueMessagePublished()
 }
 
 // Publishes an enriched log to RabbitMQ and reports broker failures.
@@ -312,9 +347,58 @@ func (publisher *Publisher) markDisconnected() {
 	}
 }
 
+// Opens a broker connection with the configured host, port, credentials and virtual host.
+func DialBroker(applicationConfiguration config.ApplicationConfiguration) (*amqp.Connection, error) {
+	scheme := "amqp"
+	if applicationConfiguration.RabbitMQUseTLS {
+		scheme = "amqps"
+	}
+	virtualHostPath, virtualHostRawPath := virtualHostPaths(applicationConfiguration.RabbitMQVirtualHost)
+	connectionURL := url.URL{
+		Scheme:  scheme,
+		User:    url.UserPassword(applicationConfiguration.RabbitMQUsername, applicationConfiguration.RabbitMQPassword),
+		Host:    net.JoinHostPort(applicationConfiguration.RabbitMQHost, strconv.Itoa(applicationConfiguration.RabbitMQPort)),
+		Path:    virtualHostPath,
+		RawPath: virtualHostRawPath,
+	}
+	return amqp.Dial(connectionURL.String())
+}
+
+// Returns the decoded and escaped URL paths that select the virtual host.
+func virtualHostPaths(rabbitMQVirtualHost string) (string, string) {
+	if rabbitMQVirtualHost == "" {
+		rabbitMQVirtualHost = config.DefaultRabbitMQVirtualHost
+	}
+	return "/" + rabbitMQVirtualHost, "/" + url.PathEscape(rabbitMQVirtualHost)
+}
+
 // Returns the fallback channel.
 func (publisher *Publisher) FallbackChannel() <-chan model.EnrichedLog {
 	return publisher.fallbackChannel
+}
+
+// Closes the broker connection and channel held by the publisher.
+func (publisher *Publisher) Close() error {
+	publisher.mutex.Lock()
+	defer publisher.mutex.Unlock()
+
+	var closeError error
+	if publisher.channel != nil {
+		if channelCloseError := publisher.channel.Close(); channelCloseError != nil && !errors.Is(channelCloseError, amqp.ErrClosed) {
+			closeError = channelCloseError
+		}
+		publisher.channel = nil
+	}
+	if publisher.connection != nil {
+		if connectionCloseError := publisher.connection.Close(); connectionCloseError != nil && !errors.Is(connectionCloseError, amqp.ErrClosed) {
+			if closeError == nil {
+				closeError = connectionCloseError
+			}
+		}
+		publisher.connection = nil
+	}
+	publisher.isConnected = false
+	return closeError
 }
 
 // IsConnected returns connection status.

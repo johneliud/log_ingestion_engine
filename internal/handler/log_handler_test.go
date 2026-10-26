@@ -1,4 +1,4 @@
-package ingest
+package handler
 
 import (
 	"encoding/json"
@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,26 @@ import (
 )
 
 const testMaximumBodySizeInBytes = 1048576
+
+// Records the log entries the ingestion handler accepted.
+type recordingIngestionMetricsRecorder struct {
+	mutex           sync.Mutex
+	recordedEntries []model.LogEntry
+}
+
+// Records the accepted log entries.
+func (recordingRecorder *recordingIngestionMetricsRecorder) RecordLogsReceived(logs []model.LogEntry) {
+	recordingRecorder.mutex.Lock()
+	defer recordingRecorder.mutex.Unlock()
+	recordingRecorder.recordedEntries = append(recordingRecorder.recordedEntries, logs...)
+}
+
+// Returns the number of recorded log entries.
+func (recordingRecorder *recordingIngestionMetricsRecorder) recordedEntryCount() int {
+	recordingRecorder.mutex.Lock()
+	defer recordingRecorder.mutex.Unlock()
+	return len(recordingRecorder.recordedEntries)
+}
 
 // Sends a POST request to the handler with the given body and content type, returning the recorded response.
 func sendLogIngestionRequest(t *testing.T, requestBody string, contentType string, maximumBodySizeInBytes int) *httptest.ResponseRecorder {
@@ -306,6 +327,39 @@ func TestNewLogIngestionHandler_QueueAdmission(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNewLogIngestionHandler_CountsOnlyTheAcceptedEntriesInTheMetricsRecorder(t *testing.T) {
+	t.Parallel()
+	recordingRecorder := &recordingIngestionMetricsRecorder{}
+	rawLogsQueue := pipeline.NewRawLogsQueue(10, 20*time.Millisecond)
+	request := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(`[`+validEntryJSON+`,{}]`))
+	request.Header.Set("Content-Type", "application/json")
+	responseRecorder := httptest.NewRecorder()
+	NewLogIngestionHandler(testMaximumBodySizeInBytes, WithRawLogPusher(rawLogsQueue), WithIngestionMetricsRecorder(recordingRecorder)).ServeHTTP(responseRecorder, request)
+
+	if responseRecorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", responseRecorder.Code, http.StatusAccepted)
+	}
+	if recordingRecorder.recordedEntryCount() != 1 {
+		t.Errorf("recorded entry count = %d, want 1", recordingRecorder.recordedEntryCount())
+	}
+}
+
+func TestNewLogIngestionHandler_CountsAcceptedEntriesWithoutARawLogPusher(t *testing.T) {
+	t.Parallel()
+	recordingRecorder := &recordingIngestionMetricsRecorder{}
+	request := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(`[`+validEntryJSON+`,{}]`))
+	request.Header.Set("Content-Type", "application/json")
+	responseRecorder := httptest.NewRecorder()
+	NewLogIngestionHandler(testMaximumBodySizeInBytes, WithIngestionMetricsRecorder(recordingRecorder)).ServeHTTP(responseRecorder, request)
+
+	if responseRecorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", responseRecorder.Code, http.StatusAccepted)
+	}
+	if recordingRecorder.recordedEntryCount() != 1 {
+		t.Errorf("recorded entry count = %d, want 1", recordingRecorder.recordedEntryCount())
 	}
 }
 

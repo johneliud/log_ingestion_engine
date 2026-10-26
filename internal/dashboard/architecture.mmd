@@ -26,11 +26,12 @@ flowchart LR
 
     subgraph delivery["Consumers and storage"]
         direction TB
-        amqpConsumer["AMQP consumers<br/>one per destination queue<br/>ack after stored"]
+        supervisor["Supervisor<br/>one connection<br/>declares topology, reconnects"]
+        amqpConsumer["AMQP consumers<br/>one connection per queue<br/>ack after stored"]
         fallbackConsumer["Fallback consumer"]
         batchWriter["Batch writer<br/>per-destination buffers<br/>retry with backoff"]
         sqlite[("SQLite<br/>logs_service1.db<br/>logs_service2.db<br/>logs_service3.db")]
-        deadLetters[("Dead-letter NDJSON<br/>rotated by size")]
+        deadLetters[("Dead-letter NDJSON<br/>one shared file<br/>rotated by size")]
         replay["cmd/replay"]
     end
 
@@ -38,7 +39,8 @@ flowchart LR
     rawQueue --> enrich --> route --> rabbitPublisher
     rabbitPublisher -->|"connected"| broker
     rabbitPublisher -->|"publish fails"| fallback
-    broker -->|"deliver"| amqpConsumer
+    broker -->|"deliver"| supervisor
+    supervisor --> amqpConsumer
     fallback -->|"stored directly, never re-published"| fallbackConsumer
     amqpConsumer --> batchWriter
     fallbackConsumer --> batchWriter
