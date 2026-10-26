@@ -86,6 +86,66 @@ func failingSupervisor(dialRecorder *supervisorDialRecorder, reconnectBackoffDel
 	})
 }
 
+// Reports when a consumer stops and when it observes the cancellation of its context.
+type observableDestinationConsumer struct {
+	stoppedChannel   chan struct{}
+	cancelledChannel chan struct{}
+}
+
+// Stops the consumer when its context is cancelled.
+func (observableConsumer *observableDestinationConsumer) Start(applicationContext context.Context) <-chan struct{} {
+	completed := make(chan struct{})
+	go func() {
+		defer close(completed)
+		<-applicationContext.Done()
+		close(observableConsumer.cancelledChannel)
+	}()
+	return completed
+}
+
+func TestSupervisor_StopsTheSiblingConsumersWhenOneDestinationConsumerStops(t *testing.T) {
+	t.Parallel()
+
+	consumerContext, cancelConsumers := context.WithCancel(context.Background())
+	defer cancelConsumers()
+
+	stoppedConsumerCompletion := make(chan struct{})
+	close(stoppedConsumerCompletion)
+	siblingConsumer := &observableDestinationConsumer{
+		stoppedChannel:   make(chan struct{}),
+		cancelledChannel: make(chan struct{}),
+	}
+
+	supervisor := &Supervisor{}
+	supervisor.stopConsumersWhenOneStops(context.Background(), cancelConsumers, []<-chan struct{}{stoppedConsumerCompletion, siblingConsumer.Start(consumerContext)})
+
+	select {
+	case <-siblingConsumer.cancelledChannel:
+	case <-time.After(time.Second):
+		t.Fatal("the sibling consumer was not stopped after the first consumer ended")
+	}
+}
+
+func TestSupervisor_ReturnsWithoutConsumersInsteadOfWaitingForever(t *testing.T) {
+	t.Parallel()
+
+	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
+	applicationContextCancellation()
+
+	supervisor := &Supervisor{}
+	stoppedWithoutConsumers := make(chan struct{})
+	go func() {
+		defer close(stoppedWithoutConsumers)
+		supervisor.stopConsumersWhenOneStops(applicationContext, func() {}, nil)
+	}()
+
+	select {
+	case <-stoppedWithoutConsumers:
+	case <-time.After(time.Second):
+		t.Fatal("the supervisor waited for consumers that do not exist")
+	}
+}
+
 func TestSupervisor_RetriesTheDialAndStopsWhenTheContextIsCancelled(t *testing.T) {
 	t.Parallel()
 
