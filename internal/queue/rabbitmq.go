@@ -17,8 +17,9 @@ import (
 )
 
 var (
-	ErrFallbackFull = errors.New("in-memory fallback is full")
-	ErrNotConnected = errors.New("not connected to rabbitmq")
+	ErrFallbackFull    = errors.New("in-memory fallback is full")
+	ErrNotConnected    = errors.New("not connected to rabbitmq")
+	ErrPublisherClosed = errors.New("the publisher is closed")
 )
 
 // Attempts to establish the broker connection used by the publisher.
@@ -59,6 +60,7 @@ type Publisher struct {
 	fallbackChannel          chan model.EnrichedLog
 	fallbackCapacity         int
 	isConnected              bool
+	isClosed                 bool
 	returns                  chan amqp.Return
 	connectionLostChannel    chan struct{}
 	connectOperation         brokerConnectOperation
@@ -188,6 +190,9 @@ func (publisher *Publisher) RunReconnectLoop(applicationContext context.Context)
 			if applicationContext.Err() != nil {
 				return
 			}
+			if publisher.IsClosed() {
+				return
+			}
 
 			if publisher.IsConnected() {
 				reconnectAttemptIndex = 0
@@ -235,6 +240,9 @@ func (publisher *Publisher) watchConnectionClose(connection *amqp.Connection, ch
 
 // Publish publishes a log with timeout and activates fallback on failure.
 func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
+	if publisher.IsClosed() {
+		return ErrPublisherClosed
+	}
 	if !publisher.IsConnected() {
 		slog.Warn("rabbitmq not connected, using in-memory fallback", "destination", enrichedLog.Destination, "batch_id", enrichedLog.BatchID)
 		return publisher.publishToFallbackAndRecord(enrichedLog)
@@ -382,6 +390,7 @@ func (publisher *Publisher) Close() error {
 	publisher.mutex.Lock()
 	defer publisher.mutex.Unlock()
 
+	publisher.isClosed = true
 	var closeError error
 	if publisher.channel != nil {
 		if channelCloseError := publisher.channel.Close(); channelCloseError != nil && !errors.Is(channelCloseError, amqp.ErrClosed) {
@@ -406,6 +415,13 @@ func (publisher *Publisher) IsConnected() bool {
 	publisher.mutex.RLock()
 	defer publisher.mutex.RUnlock()
 	return publisher.isConnected
+}
+
+// IsClosed returns whether the publisher stopped accepting logs.
+func (publisher *Publisher) IsClosed() bool {
+	publisher.mutex.RLock()
+	defer publisher.mutex.RUnlock()
+	return publisher.isClosed
 }
 
 // Returns the backoff delay for a reconnect attempt, reusing the last configured delay.
