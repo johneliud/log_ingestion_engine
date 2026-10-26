@@ -98,6 +98,7 @@ func TestDashboardHandler_ServesCommittedAssets(t *testing.T) {
 		{name: "page script", requestPath: "/dashboard/js/app.js", expectedStatus: http.StatusOK, expectedMediaType: "text/javascript", expectedSubstring: "fetchMetricsSnapshot"},
 		{name: "vendored chart library", requestPath: "/dashboard/js/chart.umd.js", expectedStatus: http.StatusOK, expectedMediaType: "text/javascript", expectedSubstring: "Chart.js"},
 		{name: "vendored diagram library", requestPath: "/dashboard/js/mermaid.min.js", expectedStatus: http.StatusOK, expectedMediaType: "text/javascript", expectedSubstring: "mermaid"},
+		{name: "vendored page font", requestPath: "/dashboard/fonts/space-grotesk-latin.woff2", expectedStatus: http.StatusOK, expectedMediaType: "font/woff2", expectedSubstring: "wOF2"},
 		{name: "architecture diagram source", requestPath: "/dashboard/architecture.mmd", expectedStatus: http.StatusOK, expectedMediaType: "text/plain", expectedSubstring: "flowchart LR"},
 		{name: "unknown asset", requestPath: "/dashboard/missing.js", expectedStatus: http.StatusNotFound, expectedMediaType: "", expectedSubstring: ""},
 		{name: "asset directory", requestPath: "/dashboard/js", expectedStatus: http.StatusNotFound, expectedMediaType: "", expectedSubstring: ""},
@@ -157,7 +158,7 @@ func TestDashboardHandler_EveryPageClassIsInTheGeneratedStylesheet(t *testing.T)
 func TestDashboardAssets_ReferenceNoExternalResources(t *testing.T) {
 	t.Parallel()
 
-	for _, assetName := range []string{"index.html", "root.html", "static/js/app.js", "static/js/architecture.js"} {
+	for _, assetName := range []string{"index.html", "root.html", "static/js/app.js", "static/js/architecture.js", "static/css/input.css"} {
 		content, readError := dashboard.Assets.ReadFile(assetName)
 		if readError != nil {
 			t.Fatalf("reading the embedded %s: %v", assetName, readError)
@@ -173,5 +174,29 @@ func TestDashboardAssets_ReferenceNoExternalResources(t *testing.T) {
 	}
 	if !strings.Contains(string(pageScript), `"/metrics"`) {
 		t.Errorf("app.js does not poll the local /metrics endpoint")
+	}
+}
+
+func TestDashboardStylesheet_UsesOnlyTheVendoredSpaceGroteskFont(t *testing.T) {
+	t.Parallel()
+
+	stylesheetSource, sourceError := dashboard.Assets.ReadFile("static/css/input.css")
+	if sourceError != nil {
+		t.Fatalf("reading the embedded stylesheet source: %v", sourceError)
+	}
+	stylesheetText := string(stylesheetSource)
+	if !strings.Contains(stylesheetText, `--font-sans: "Space Grotesk";`) {
+		t.Errorf("the stylesheet does not set Space Grotesk as the only sans-serif font")
+	}
+	if !strings.Contains(stylesheetText, `--font-mono: "Space Grotesk";`) {
+		t.Errorf("the stylesheet does not set Space Grotesk as the only monospace font")
+	}
+
+	compiledStyles, stylesError := dashboard.Assets.ReadFile("static/css/styles.css")
+	if stylesError != nil {
+		t.Fatalf("reading the embedded stylesheet: %v", stylesError)
+	}
+	if !strings.Contains(string(compiledStyles), "Space Grotesk") {
+		t.Errorf("the generated stylesheet does not declare the Space Grotesk font face")
 	}
 }
