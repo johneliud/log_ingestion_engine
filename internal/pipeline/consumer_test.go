@@ -54,7 +54,14 @@ func TestBatchConsumer_ProcessesBatchesThroughEnrichmentAndRouting(t *testing.T)
 	t.Parallel()
 	rawLogsChannel := make(chan model.RawLog, 100)
 	publisher := &fakePublisher{}
-	consumer := NewBatchConsumer(rawLogsChannel, 50, 4, fakeEnricher{}, fakeRouter{}, publisher)
+	consumer := NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsChannel:    rawLogsChannel,
+		ConsumerBatchSize: 50,
+		WorkerCount:       4,
+		Enricher:          fakeEnricher{},
+		Router:            fakeRouter{},
+		QueuePublisher:    publisher,
+	})
 
 	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
 	defer applicationContextCancellation()
@@ -89,7 +96,14 @@ func TestBatchConsumer_DrainsAfterCancellation(t *testing.T) {
 	applicationContext, cancel := context.WithCancel(context.Background())
 	cancel()
 	publisher := &fakePublisher{}
-	consumer := NewBatchConsumer(rawLogsChannel, 2, 4, fakeEnricher{}, fakeRouter{}, publisher)
+	consumer := NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsChannel:    rawLogsChannel,
+		ConsumerBatchSize: 2,
+		WorkerCount:       4,
+		Enricher:          fakeEnricher{},
+		Router:            fakeRouter{},
+		QueuePublisher:    publisher,
+	})
 	waitForConsumer(t, consumer.Start(applicationContext))
 	if publisher.count() != 11 || len(rawLogsChannel) != 0 {
 		t.Fatalf("published %d, queued %d; want 11 published and no queued logs", publisher.count(), len(rawLogsChannel))
@@ -126,7 +140,14 @@ func TestBatchConsumer_FinishesCurrentBatchAndQueuedBatches(t *testing.T) {
 	})
 	applicationContext, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	consumer := NewBatchConsumer(rawLogsChannel, 2, 1, fakeEnricher{}, fakeRouter{}, blockingPublisher)
+	consumer := NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsChannel:    rawLogsChannel,
+		ConsumerBatchSize: 2,
+		WorkerCount:       1,
+		Enricher:          fakeEnricher{},
+		Router:            fakeRouter{},
+		QueuePublisher:    blockingPublisher,
+	})
 	completed := consumer.Start(applicationContext)
 	select {
 	case <-entered:
@@ -143,6 +164,86 @@ func TestBatchConsumer_FinishesCurrentBatchAndQueuedBatches(t *testing.T) {
 	waitForConsumer(t, completed)
 	if publisher.count() != 5 {
 		t.Fatalf("published count = %d, want 5", publisher.count())
+	}
+}
+
+func TestBatchConsumer_DeadLettersTheLogsItCouldNotPublish(t *testing.T) {
+	t.Parallel()
+	rawLogsChannel := make(chan model.RawLog, 2)
+	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims", Level: model.LogLevelError, Message: "x", Timestamp: "2026-10-24T10:00:00Z"}}
+	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "billing", Level: model.LogLevelInfo, Message: "y", Timestamp: "2026-10-24T10:00:01Z"}}
+
+	deadLetteredEntries := make([]model.DeadLetterEntry, 0)
+	deadLetterSink := func(deadLetterEntry model.DeadLetterEntry) error {
+		deadLetteredEntries = append(deadLetteredEntries, deadLetterEntry)
+		return nil
+	}
+	publish := publisherFunc(func(log model.EnrichedLog) error {
+		if log.Service == "claims" {
+			return errors.New("publish failed")
+		}
+		return nil
+	})
+
+	applicationContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	waitForConsumer(t, NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsChannel:      rawLogsChannel,
+		ConsumerBatchSize:   2,
+		WorkerCount:         1,
+		Enricher:            fakeEnricher{},
+		Router:              fakeRouter{},
+		QueuePublisher:      publish,
+		DeadLetterSink:      deadLetterSink,
+		CurrentTimeProvider: func() time.Time { return time.Unix(0, 0).UTC() },
+	}).Start(applicationContext))
+
+	if len(deadLetteredEntries) != 1 {
+		t.Fatalf("dead letter entry count = %d, want 1", len(deadLetteredEntries))
+	}
+	if deadLetteredEntries[0].Log.Service != "claims" {
+		t.Errorf("dead lettered log service = %q, want %q", deadLetteredEntries[0].Log.Service, "claims")
+	}
+	if deadLetteredEntries[0].ErrorMessage != "publish failed" {
+		t.Errorf("dead letter error message = %q, want %q", deadLetteredEntries[0].ErrorMessage, "publish failed")
+	}
+	if !deadLetteredEntries[0].FailedAt.Equal(time.Unix(0, 0).UTC()) {
+		t.Errorf("dead letter failure time = %s, want %s", deadLetteredEntries[0].FailedAt, time.Unix(0, 0).UTC())
+	}
+}
+
+func TestBatchConsumer_DeadLettersTheLogsItCouldNotRouteWithTheDefaultDestination(t *testing.T) {
+	t.Parallel()
+	rawLogsChannel := make(chan model.RawLog, 1)
+	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims"}}
+
+	deadLetteredEntries := make([]model.DeadLetterEntry, 0)
+	route := routerFunc(func(log model.EnrichedLog) (model.EnrichedLog, error) {
+		return model.EnrichedLog{}, errors.New("route failed")
+	})
+
+	applicationContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	waitForConsumer(t, NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsChannel:    rawLogsChannel,
+		ConsumerBatchSize: 1,
+		WorkerCount:       1,
+		Enricher:          fakeEnricher{},
+		Router:            route,
+		QueuePublisher:    &fakePublisher{},
+		DeadLetterSink: func(deadLetterEntry model.DeadLetterEntry) error {
+			deadLetteredEntries = append(deadLetteredEntries, deadLetterEntry)
+			return nil
+		},
+		DefaultDestination:  model.DestinationService3,
+		CurrentTimeProvider: func() time.Time { return time.Unix(0, 0).UTC() },
+	}).Start(applicationContext))
+
+	if len(deadLetteredEntries) != 1 {
+		t.Fatalf("dead letter entry count = %d, want 1", len(deadLetteredEntries))
+	}
+	if deadLetteredEntries[0].Log.Destination != model.DestinationService3 {
+		t.Errorf("dead lettered log destination = %q, want %q", deadLetteredEntries[0].Log.Destination, model.DestinationService3)
 	}
 }
 
@@ -171,7 +272,14 @@ func TestBatchConsumer_LogsErrorsAndContinues(t *testing.T) {
 	})
 	applicationContext, cancel := context.WithCancel(context.Background())
 	cancel()
-	waitForConsumer(t, NewBatchConsumer(rawLogsChannel, 3, 1, fakeEnricher{}, route, publish).Start(applicationContext))
+	waitForConsumer(t, NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsChannel:    rawLogsChannel,
+		ConsumerBatchSize: 3,
+		WorkerCount:       1,
+		Enricher:          fakeEnricher{},
+		Router:            route,
+		QueuePublisher:    publish,
+	}).Start(applicationContext))
 	if published.count() != 2 {
 		t.Fatalf("publish attempts = %d, want 2 (skip route failure and continue after publish failure)", published.count())
 	}
