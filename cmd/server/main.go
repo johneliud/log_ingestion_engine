@@ -45,13 +45,22 @@ func logConfigurationSummary(applicationConfiguration config.ApplicationConfigur
 	)
 }
 
-// Serves the root endpoint and POST /logs handler until the context is cancelled, then shuts the server down within the shutdown grace period.
-func runHTTPServerUntilContextIsCancelled(applicationContext context.Context, applicationConfiguration config.ApplicationConfiguration) error {
+// Builds the request router with the ingestion, metrics, dashboard and home page routes wired.
+func buildRequestRouter(applicationConfiguration config.ApplicationConfiguration) *http.ServeMux {
 	requestRouter := http.NewServeMux()
 	requestRouter.HandleFunc("POST /logs", handler.NewLogIngestionHandler(applicationConfiguration.MaximumBodySizeInBytes))
 	metricsRegistry := metrics.NewMetrics(applicationConfiguration.MetricsThroughputWindow, nil)
 	requestRouter.HandleFunc("GET /metrics", handler.NewMetricsHandler(metricsRegistry, applicationConfiguration))
-	requestRouter.HandleFunc("/", handler.RootEndpointHandler())
+	dashboardHandler := handler.NewDashboardHandler()
+	requestRouter.HandleFunc("GET /dashboard", dashboardHandler)
+	requestRouter.HandleFunc("GET /dashboard/", dashboardHandler)
+	requestRouter.HandleFunc("GET /{$}", handler.RootEndpointHandler())
+	return requestRouter
+}
+
+// Serves the root endpoint and POST /logs handler until the context is cancelled, then shuts the server down within the shutdown grace period.
+func runHTTPServerUntilContextIsCancelled(applicationContext context.Context, applicationConfiguration config.ApplicationConfiguration) error {
+	requestRouter := buildRequestRouter(applicationConfiguration)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", applicationConfiguration.HTTPPort),
