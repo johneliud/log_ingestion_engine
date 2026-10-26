@@ -1,4 +1,4 @@
-package ingest
+package handler
 
 import (
 	"encoding/json"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/johneliud/log_ingestion_engine/internal/ingest"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 	"github.com/johneliud/log_ingestion_engine/internal/pipeline"
 )
@@ -67,7 +68,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 			return
 		}
 
-		validEntries, rejectedEntries := validateLogEntries(logEntries)
+		validEntries, rejectedEntries := ingest.ValidateLogEntries(logEntries)
 
 		if len(logEntries) > 0 && len(validEntries) == 0 {
 			writeJSONResponse(responseWriter, http.StatusBadRequest, model.AllEntriesRejectedResponse{
@@ -78,7 +79,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 		}
 
 		if handlerConfiguration.rawLogPusher != nil && len(validEntries) > 0 {
-			sourceIP := ResolveClientIP(request, handlerConfiguration.trustedProxies)
+			sourceIP := ingest.ResolveClientIP(request, handlerConfiguration.trustedProxies)
 			receivedAt := handlerConfiguration.currentTimeProvider()
 			batchID := uuid.NewString()
 			rawLogs := make([]model.RawLog, 0, len(validEntries))
