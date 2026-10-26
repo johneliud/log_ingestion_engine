@@ -103,3 +103,46 @@ func (metrics *Metrics) SetQueueBacklog(backlog int) {
 	metrics.queueBacklog = backlog
 }
 
+// Returns an immutable copy of every metric with error rate and throughput already computed.
+func (metrics *Metrics) Snapshot() Snapshot {
+	metrics.mutex.RLock()
+	defer metrics.mutex.RUnlock()
+
+	logsByLevel := make(map[string]uint64, len(metrics.logsByLevel))
+	for level, count := range metrics.logsByLevel {
+		logsByLevel[string(level)] = count
+	}
+
+	logsByService := make(map[string]uint64, len(metrics.logsByService))
+	for serviceName, count := range metrics.logsByService {
+		logsByService[serviceName] = count
+	}
+
+	errorRate := float64(0)
+	if metrics.totalLogsReceived > 0 {
+		errorRate = float64(metrics.logsByLevel[model.LogLevelError]) / float64(metrics.totalLogsReceived)
+	}
+
+	throughput := float64(0)
+	windowDurationInSeconds := metrics.throughputWindow.Seconds()
+	if windowDurationInSeconds > 0 {
+		var throughputWindowTotal uint64
+		for _, count := range metrics.throughputWindowCounts {
+			throughputWindowTotal += count
+		}
+		throughput = float64(throughputWindowTotal) / windowDurationInSeconds
+	}
+
+	return Snapshot{
+		TotalLogsReceived:   metrics.totalLogsReceived,
+		LogsByLevel:         logsByLevel,
+		LogsByService:       logsByService,
+		ErrorRate:           errorRate,
+		Throughput:          throughput,
+		QueueBacklog:        metrics.queueBacklog,
+		RateLimitedRequests: metrics.rateLimitedRequests,
+		DeadLetteredLogs:    metrics.deadLetteredLogs,
+		WriteFailures:       metrics.writeFailures,
+	}
+}
+
