@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Log ingestion engine</title>
+    <link rel="stylesheet" href="/dashboard/css/styles.css">
+    <script src="/dashboard/js/mermaid.min.js" defer></script>
+    <script src="/dashboard/js/architecture.js" defer></script>
+</head>
+<body class="min-h-screen bg-white text-slate-900">
+    <main class="mx-auto max-w-6xl space-y-6 p-6">
+        <header class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-4">
+            <div class="flex flex-wrap items-center gap-6">
+                <h1 class="text-2xl font-semibold">Log ingestion engine</h1>
+                <nav class="flex gap-4 text-sm">
+                    <a href="/" class="font-medium text-slate-900">Home</a>
+                    <a href="/dashboard" class="text-slate-500 hover:text-slate-900">Dashboard</a>
+                    <a href="/metrics" class="text-slate-500 hover:text-slate-900">Metrics</a>
+                </nav>
+            </div>
+            <p class="text-sm text-slate-500">HTTP log ingestion, queuing, storage and metrics</p>
+        </header>
+
+        <section class="space-y-2">
+            <h2 class="text-lg font-semibold">Architecture</h2>
+            <p class="text-sm text-slate-700">Logs enter through <span class="font-mono">POST /logs</span>, are validated per entry, pushed onto a bounded <span class="font-mono">raw_logs</span> channel and processed by the worker pool (enrichment, then service routing). The publisher delivers each enriched log to RabbitMQ, falling back to a bounded in-memory buffer while disconnected. Per-destination consumers acknowledge only after the batch writer stores the log in SQLite, rotating dead letters when retries are exhausted. One metrics registry records counters on the ingestion path and serves <span class="font-mono">GET /metrics</span> and this page.</p>
+        </section>
+
+        <section class="rounded-xl bg-slate-50 p-4">
+            <h2 class="text-sm text-slate-500">Data path</h2>
+            <div id="architecture-diagram" class="mt-2 overflow-x-auto">loading the architecture diagram&hellip;</div>
+            <p id="diagram-status" class="mt-2 hidden text-sm text-amber-600"></p>
+        </section>
+
+        <section class="space-y-2">
+            <h2 class="text-lg font-semibold">Package responsibilities</h2>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/config</h3>
+                    <p class="mt-1 text-sm text-slate-500">Environment and file settings, parsed and validated with documented defaults.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/model</h3>
+                    <p class="mt-1 text-sm text-slate-500">Shared request and pipeline types with explicit JSON tags.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/handler</h3>
+                    <p class="mt-1 text-sm text-slate-500">HTTP handlers: log ingestion, metrics, home page and dashboard.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/ingest</h3>
+                    <p class="mt-1 text-sm text-slate-500">Per-entry validation and shared client IP resolution.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/ratelimit</h3>
+                    <p class="mt-1 text-sm text-slate-500">In-memory per-IP limiter with idle cleanup and middleware.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/pipeline</h3>
+                    <p class="mt-1 text-sm text-slate-500">Bounded raw-logs queue and the enrichment/routing worker pool.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/enrich</h3>
+                    <p class="mt-1 text-sm text-slate-500">Timestamp, IP, environment and hostname enrichment.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/router</h3>
+                    <p class="mt-1 text-sm text-slate-500">Config-driven service-to-destination routing with defaults.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/queue</h3>
+                    <p class="mt-1 text-sm text-slate-500">RabbitMQ publisher, reconnect backoff, fallback and consumers.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/storage</h3>
+                    <p class="mt-1 text-sm text-slate-500">SQLite batch writer, retries, dead letters and replay.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/metrics</h3>
+                    <p class="mt-1 text-sm text-slate-500">Single source of truth for counters, snapshots and backlog.</p>
+                </article>
+                <article class="rounded-xl bg-slate-50 p-4">
+                    <h3 class="font-medium">internal/dashboard</h3>
+                    <p class="mt-1 text-sm text-slate-500">Embedded pages, stylesheet, charts and diagram assets.</p>
+                </article>
+            </div>
+        </section>
+    </main>
+</body>
+</html>
