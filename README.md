@@ -65,6 +65,14 @@ Clients pass through the rate limiter to `POST /logs`, where the batch is valida
 
 A consumer supervisor keeps one broker connection for the per-destination consumers and replaces it with backoff when a subscription ends. Consumers write through the retrying batch writer into one SQLite database per destination, and logs whose retries are exhausted go to the shared dead-letter file for later replay.
 
+## Concurrency model
+
+- HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded `raw_logs` channel (`pipeline.RawLogsQueue` push with a per-log send budget, the whole request answers `503` when a push times out).
+- `PIPELINE_WORKER_COUNT` workers take batches from that one channel, enrich, route and publish each log, waiting for the broker confirm per log. They share one publisher whose bounded in-memory fallback and one fallback consumer drain it while disconnected.
+- One consumer per destination queue holds its own AMQP connection; the supervisor owns one shared connection and replaces failed subscriptions with backoff.
+- The batch writer is a single sink goroutine with per-destination buffers and one retry loop; the dead-letter writer is a single goroutine owning all file I/O; metrics counters are mutex-guarded atomics-snapshot style.
+- Shutdown walks these pieces in reverse order under one grace-period deadline (see `Graceful shutdown`).
+
 ## Clone
 
 ```bash
@@ -79,7 +87,7 @@ cd log_ingestion_engine
 
 ## Setup
 
-1. Copy `configs/.env.example` to `.env` and replace the credential placeholders:
+1. Copy `configs/.env.example` to `.env` and replace the credential placeholders. Every variable and default is listed in [`docs/CONFIG.md`](docs/CONFIG.md).
 
    ```bash
    cp configs/.env.example .env
@@ -123,6 +131,28 @@ Client IP is taken from the first entry of `X-Forwarded-For` (trimmed, validated
 `X-Forwarded-For` is client-controlled and only honored when the request comes from a configured trusted proxy; without one, the socket address host is used. The same function is used by the rate-limit middleware and for capturing `source_ip`. All `"unknown"` callers share one bucket. The limiter is in-memory and single-instance (lost on restart).
 
 Trusted proxies are configured with `TRUSTED_PROXIES` as a comma-separated list of CIDR prefixes, for example `10.0.0.0/8,192.168.0.0/16`. The list is empty by default, which means forwarded headers are ignored. Every entry is validated as a CIDR prefix at startup and an invalid prefix fails the boot with a readable error.
+
+## Rate limiting
+
+`POST /logs` limits requests per source IP: `RATE_LIMIT` requests per second per IP bucket (default `1000`), counting requests, not log entries, so large batches are the cheapest way to ingest at volume. When a bucket is empty, the request answers `429 {"error":"rate limit exceeded"}` and the `rate_limited_requests` counter on `/metrics.json` is incremented; the bucket refills continuously and idle buckets are evicted every `RATE_LIMIT_CLEANUP_INTERVAL`.
+
+## API examples
+
+Send a batch (every entry is validated independently; the batch is still accepted when only some entries are invalid):
+
+```bash
+curl -i -X POST localhost:8080/logs -H 'Content-Type: application/json' \
+  -d '[{"timestamp":"2026-10-24T10:00:00Z","service":"claims","level":"ERROR","message":"timeout"}]'
+```
+
+Watch the logs arrive on the metrics page and the dashboard, both refreshed every five seconds:
+
+```bash
+curl -s localhost:8080/metrics.json | python3 -m json.tool
+curl -si localhost:8080/dashboard >/dev/null   # 200 with the HTML dashboard
+```
+
+Every status code per endpoint, the per-entry validation error shape and the metrics snapshot fields are specified in [`docs/api.md`](docs/api.md).
 
 ## Dead letters and replay
 
@@ -177,6 +207,15 @@ make dashboard-css
 The sources are listed with `@source` rules in `internal/dashboard/static/css/input.css`, so the stylesheet is regenerated whenever one of them changes.
 
 The target downloads the Tailwind v4.3.3 standalone CLI (linux-x64) into the git-ignored `bin/` on first use. No Node or npm required, and `go build` never depends on it.
+
+## Known limitations
+
+- **Single instance only.** The rate limiter registry, the metrics counters and the queue backlog fallback live in process memory; a second replica keeps separate buckets and counters, and a restart resets all of them.
+- **Metrics are not persisted.** Counters, throughput and error-rate history reset when the process restarts. Logs themselves are durable: SQLite, the dead-letter file and the broker queues with their unacknowledged messages.
+- **No authentication on the ingestion API.** `POST /logs` is open to any caller; the only per-caller control is the per-IP rate limit, which is itself in-memory and single-instance.
+- **Credentials come from files and environment.** There is no secrets-manager integration; `RABBITMQ_USER` and `RABBITMQ_PASS` are read from `.env` or the process environment.
+- **No alerting.** There is nothing that pages anyone when a counter crosses a threshold; `/dashboard` and `/metrics` report the values, but any alerting is up to your monitoring stack.
+- **Dashboard renders offline, metrics do not always.** The dashboard never loads external assets, but `queue_backlog` is accurate only when the RabbitMQ management API is reachable; otherwise a local estimate is reported.
 
 ## Tests
 
