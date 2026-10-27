@@ -70,7 +70,7 @@ A consumer supervisor keeps one broker connection for the per-destination consum
 - HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded `raw_logs` channel (`pipeline.RawLogsQueue` push with a per-log send budget, the whole request answers `503` when a push times out).
 - `PIPELINE_WORKER_COUNT` workers take batches from that one channel, enrich, route and publish each log, waiting for the broker confirm per log. They share one publisher whose bounded in-memory fallback and one fallback consumer drain it while disconnected.
 - One consumer per destination queue holds its own AMQP connection; the supervisor owns one shared connection and replaces failed subscriptions with backoff.
-- The batch writer is a single sink goroutine with per-destination buffers and one retry loop; the dead-letter writer is a single goroutine owning all file I/O; metrics counters are mutex-guarded atomics-snapshot style.
+- The batch writer is a single sink goroutine with per-destination buffers and one retry loop. The dead-letter writer is a single goroutine owning all file I/O. Metrics counters are mutex-guarded atomics-snapshot style.
 - Shutdown walks these pieces in reverse order under one grace-period deadline (see `Graceful shutdown`).
 
 ## Clone
