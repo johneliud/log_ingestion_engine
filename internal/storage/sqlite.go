@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/johneliud/log_ingestion_engine/internal/config"
@@ -16,6 +17,7 @@ import (
 const createLogsTableStatement = `
 CREATE TABLE IF NOT EXISTS logs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	log_id TEXT,
 	timestamp TEXT NOT NULL,
 	service TEXT NOT NULL,
 	level TEXT NOT NULL,
@@ -25,11 +27,22 @@ CREATE TABLE IF NOT EXISTS logs (
 	env TEXT NOT NULL
 )`
 
+const logIDColumnName = "log_id"
+
+const createLogIDUniqueIndexStatement = `
+CREATE UNIQUE INDEX IF NOT EXISTS logs_log_id_unique ON logs (log_id)`
+
 const insertLogStatement = `
-INSERT INTO logs (timestamp, service, level, message, received_at, source_ip, env)
-VALUES (?, ?, ?, ?, ?, ?, ?)`
+INSERT INTO logs (timestamp, service, level, message, received_at, source_ip, env, log_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (log_id) DO NOTHING`
 
 const receivedAtLayout = "2006-01-02T15:04:05.000000Z07:00"
+
+// Builds the statement adding the log_id column to logs tables created before it existed.
+func migrateLogIDColumnStatement() string {
+	return "ALTER TABLE logs ADD COLUMN " + logIDColumnName + " TEXT"
+}
 
 // Represents one destination database and the statement used to append logs to it.
 type destinationDatabase struct {
@@ -69,7 +82,7 @@ func NewSQLiteLogStore(applicationConfiguration config.ApplicationConfiguration)
 	return &SQLiteLogStore{databases: databases}, nil
 }
 
-// Opens one destination database, enables WAL, creates the logs table and prepares the insert statement.
+// Opens one destination database, enables WAL, creates the logs table, migrates it and prepares the insert statement.
 func openDestinationDatabase(databaseDirectoryPath string, databaseFileName string, busyTimeoutInMilliseconds int64) (*destinationDatabase, error) {
 	databasePath := filepath.Join(databaseDirectoryPath, databaseFileName)
 	dataSourceQuery := url.Values{}
@@ -86,6 +99,18 @@ func openDestinationDatabase(databaseDirectoryPath string, databaseFileName stri
 	if _, tableCreationError := database.Exec(createLogsTableStatement); tableCreationError != nil {
 		database.Close()
 		return nil, fmt.Errorf("creating logs table in database %q: %w", databasePath, tableCreationError)
+	}
+
+	if !tableHasColumn(database, "logs", logIDColumnName) {
+		if _, migrationError := database.Exec(migrateLogIDColumnStatement()); migrationError != nil {
+			database.Close()
+			return nil, fmt.Errorf("migrating logs table in database %q: %w", databasePath, migrationError)
+		}
+	}
+
+	if _, indexCreationError := database.Exec(createLogIDUniqueIndexStatement); indexCreationError != nil {
+		database.Close()
+		return nil, fmt.Errorf("creating the log id unique index in database %q: %w", databasePath, indexCreationError)
 	}
 
 	insertStatement, prepareError := database.Prepare(insertLogStatement)
@@ -121,6 +146,7 @@ func (sqliteLogStore *SQLiteLogStore) StoreBatch(destination model.Destination, 
 			enrichedLog.ReceivedAt.UTC().Format(receivedAtLayout),
 			enrichedLog.SourceIP,
 			enrichedLog.Environment,
+			enrichedLog.LogID,
 		)
 		if insertError != nil {
 			transaction.Rollback()
@@ -161,4 +187,32 @@ func closeDestinationDatabases(databases map[model.Destination]*destinationDatab
 		destinationDatabase.insertStatement.Close()
 		destinationDatabase.database.Close()
 	}
+}
+
+// Reports whether a table has the named column in its schema.
+func tableHasColumn(database *sql.DB, tableName string, columnName string) bool {
+	columnNames, columnError := queryColumnNames(database, tableName)
+	if columnError != nil {
+		return false
+	}
+	return slices.Contains(columnNames, columnName)
+}
+
+// Returns every column name of a table, or an error when the table does not exist.
+func queryColumnNames(database *sql.DB, tableName string) ([]string, error) {
+	rows, rowsError := database.Query(fmt.Sprintf("SELECT name FROM pragma_table_info(%q)", tableName))
+	if rowsError != nil {
+		return nil, fmt.Errorf("reading the schema of table %q: %w", tableName, rowsError)
+	}
+	defer rows.Close()
+
+	var columnNames []string
+	for rows.Next() {
+		var columnName string
+		if scanError := rows.Scan(&columnName); scanError != nil {
+			return nil, fmt.Errorf("scanning the schema of table %q: %w", tableName, scanError)
+		}
+		columnNames = append(columnNames, columnName)
+	}
+	return columnNames, rows.Err()
 }
