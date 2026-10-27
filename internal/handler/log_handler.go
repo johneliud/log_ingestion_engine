@@ -92,6 +92,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 			for _, validEntry := range validEntries {
 				rawLogs = append(rawLogs, model.RawLog{
 					LogEntry:   validEntry,
+					LogID:      uuid.NewString(),
 					BatchID:    batchID,
 					SourceIP:   sourceIP,
 					ReceivedAt: receivedAt,

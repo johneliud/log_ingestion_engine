@@ -3,6 +3,7 @@ package enrich
 import (
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 )
 
@@ -42,10 +43,19 @@ func (logEnricher *LogEnricher) Enrich(rawLog model.RawLog) model.EnrichedLog {
 
 	return model.EnrichedLog{
 		LogEntry:    rawLog.LogEntry,
+		LogID:       logEnricher.logIDOrDefault(rawLog.LogID),
 		BatchID:     rawLog.BatchID,
 		ReceivedAt:  receivedAt,
 		SourceIP:    sourceIP,
 		Environment: logEnricher.applicationEnvironment,
 		RetryCount:  0,
 	}
+}
+
+// Returns the raw log's identifier, generating one when the raw log carries none.
+func (logEnricher *LogEnricher) logIDOrDefault(rawLogID string) string {
+	if rawLogID != "" {
+		return rawLogID
+	}
+	return uuid.NewString()
 }
