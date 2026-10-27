@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 147 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
+All 149 tests across 14 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
 
 ## Static checks before committing
 
@@ -44,6 +44,7 @@ These are the exact gates in `.github/workflows/ci.yml`.
 | `internal/pipeline` | Batch consumer, bounded raw-logs queue, cancellation drain, recovery of the logs left in the queue, dead-lettering of the logs that cannot be routed or published |
 | `internal/queue` | Publisher, reconnect backoff, fallback activation, rejection of the logs that arrive after the close |
 | `internal/queue/consumer` | RabbitMQ delivery handling, ack-after-store, requeue, fallback drain, consumer supervisor reconnect backoff |
+| `cmd/loadtest` | Load generator helpers: source IP pool and batched request body building |
 | `internal/ratelimit` | Per-IP limiter, idle cleanup and its stop path, middleware rejection |
 | `internal/router` | Service routing rules, defaults, file loading |
 | `internal/storage` | Batch writer, SQLite store, dead-letter rotation, replay |

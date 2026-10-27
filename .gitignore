@@ -17,3 +17,6 @@ bin/
 **/chart.umd.js
 **/mermaid.min.js
 fonts/
+
+loadtest
+!cmd/loadtest

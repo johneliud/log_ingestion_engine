@@ -114,7 +114,7 @@ A log that cannot be routed or published is written to the dead-letter file inst
 
 If the grace period expires before the pipeline drains, the logs still waiting in `raw_logs` are dead-lettered and the shutdown reports the timeout.
 
-All settings come from environment variables with documented defaults in `configs/.env.example`; RabbitMQ credentials are required and the server fails fast with a readable error when a required value is missing or invalid including a malformed configuration file (a missing file is simply ignored).
+All settings come from environment variables with documented defaults in `configs/.env.example`; RabbitMQ credentials are required and the server fails fast with a readable error when a required value is missing or invalid including a malformed configuration file (a missing file is simply ignored). The full variable-by-variable breakdown lives in [`docs/CONFIG.md`](docs/CONFIG.md).
 
 ## Client IP resolution
 
@@ -192,4 +192,4 @@ The integration suite in `cmd/server/integration_test.go` wires the whole applic
 go test ./cmd/server -race -run TestIntegration -v
 ```
 
-Full instructions, package-by-package coverage and CI details are in [`docs/TESTING.md`](docs/TESTING.md).
+Full instructions, package-by-package coverage and CI details are in [`docs/TESTING.md`](docs/TESTING.md). The 1,000 logs per second load test with its bottleneck analysis is recorded in [`docs/load-test.md`](docs/load-test.md).
