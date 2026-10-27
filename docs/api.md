@@ -35,6 +35,8 @@ Each log entry object:
 
 The rate limit (`429`) is applied by the per-IP middleware before the handler runs: each source IP gets `RATE_LIMIT` (default 1000) requests per second, and a request uses one token no matter how many log entries its batch carries.
 
+Storage writes are idempotent. Every accepted entry receives a `log_id` (UUID, generated at ingestion) that is carried through the pipeline, the queue payload and the dead-letter file, and `StoreBatch` writes with `ON CONFLICT (log_id) DO NOTHING` against a unique index, so a redelivered queue message or a replayed dead-letter entry cannot duplicate a stored row. Logs stored before this change keep their own rows and gain an empty `log_id`.
+
 ### Response shapes
 
 #### AcceptedResponse (202)

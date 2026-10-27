@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 149 tests across 14 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
+All 152 tests across 14 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
 
 ## Static checks before committing
 
