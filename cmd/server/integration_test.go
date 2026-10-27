@@ -88,12 +88,23 @@ func integrationTestBaseConfiguration(t *testing.T) config.ApplicationConfigurat
 	return applicationConfiguration
 }
 
-// Skips the test when the broker cannot be reached.
+// Names the environment variable that turns skipped broker tests into failures in credentialed CI.
+const brokerTestsRequiredEnvironmentName = "CI_REQUIRE_BROKER_TESTS"
+
+// Returns whether credentialed CI set the flag that makes a missing broker fail instead of skip.
+func brokerTestsAreRequired() bool {
+	return os.Getenv(brokerTestsRequiredEnvironmentName) == "1"
+}
+
+// Fails the test when credentialed CI cannot reach the broker, and skips it everywhere else.
 func requireTheBroker(t *testing.T, applicationConfiguration config.ApplicationConfiguration) {
 	t.Helper()
 
 	connection, connectionError := queue.DialBroker(applicationConfiguration)
 	if connectionError != nil {
+		if brokerTestsAreRequired() {
+			t.Fatalf("credentialed ci requires rabbitmq, but the broker is unreachable: %v", connectionError)
+		}
 		t.Skipf("skipping the integration test because rabbitmq is unavailable: %v", connectionError)
 	}
 	if closeError := connection.Close(); closeError != nil {

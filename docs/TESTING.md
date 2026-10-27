@@ -125,7 +125,7 @@ The broker tests purge the three destination queues before they start, so do not
 3. `go vet ./...` fails on vet warnings.
 4. `go test ./... -race` fails on any test failure or data race.
 
-CI starts a RabbitMQ service container and passes the credentials to the test step, so the integration tests run against a real broker there. The credentials come from the `RABBITMQ_USER` and `RABBITMQ_PASS` repository secrets; the workflow fails with a readable message when they are missing. The broker tests still skip themselves when the broker cannot be reached, which keeps the suite green on a machine without a broker.
+CI starts a RabbitMQ service container and passes the credentials to the test step, so the integration tests run against a real broker there. The credentials come from the `RABBITMQ_USER` and `RABBITMQ_PASS` repository secrets. External pull requests (forks) cannot read the secrets: their credential check is skipped and the broker tests skip themselves. On trusted events the workflow requires the secrets and sets `CI_REQUIRE_BROKER_TESTS=1`, so a missing credential or an unreachable broker fails the build with a readable message instead of silently skipping the coverage. Locally the broker tests still skip themselves when the broker cannot be reached.
 
 ## Docker broker for manual integration
 

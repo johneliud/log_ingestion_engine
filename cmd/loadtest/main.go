@@ -67,6 +67,9 @@ func loadTestSettingsFromFlags() (loadTestSettings, error) {
 	if settings.targetLogsPerSecond <= 0 || settings.logsPerRequest <= 0 || settings.sourceIPCount <= 0 || settings.senderCount <= 0 {
 		return settings, fmt.Errorf("rate, batch, source-ips and senders must all be positive")
 	}
+	if settings.clientTimeout <= 0 {
+		return settings, fmt.Errorf("client-timeout must be a positive duration so every request carries a deadline")
+	}
 	if settings.sourceIPCount > maximumSourceIPCount {
 		return settings, fmt.Errorf("source-ips must be at most %d so the last octet stays a valid IPv4 address", maximumSourceIPCount)
 	}
