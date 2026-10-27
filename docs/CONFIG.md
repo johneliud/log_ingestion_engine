@@ -7,7 +7,7 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 1. The process environment (`os.Environ`).
 2. The configuration file, `.env` by default, overridable with `CONFIG_FILE_PATH`; file settings never override the process environment.
 
-`RABBITMQ_USER` and `RABBITMQ_PASS` are the only required settings; everything else falls back to the default shown below. No credential is ever hardcoded in the source: the binary reads them from the configuration file or the environment, and the compose stack injects the same variables into RabbitMQ.
+`RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER` and `RABBITMQ_PASS` are the only required settings; everything else falls back to the default shown below. No credential is ever hardcoded in the source: the binary reads them from the configuration file or the environment, and the compose stack injects the same variables into RabbitMQ.
 
 ## Application settings
 
@@ -59,7 +59,7 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 | `DB_BUSY_TIMEOUT` | SQLite busy timeout while a write contention is retried | `5s` |
 | `WRITE_BATCH_SIZE` | Queued logs buffered per destination before a write flush triggers | `100` |
 | `WRITE_FLUSH_INTERVAL` | Maximum time a partial buffer waits before flushing on the time trigger | `1s` |
-| `RETRY_BACKOFFS` | Comma-separated write retry delays; the last value repeats before dead-lettering | `1s,5s,10s` |
+| `RETRY_BACKOFFS` | Comma-separated write retry delays, one retry attempt per entry; the log is dead-lettered after the last retry fails | `1s,5s,10s` |
 | `DEAD_LETTER_PATH` | Newline-delimited JSON file for logs whose write retries were exhausted | `logs-failed.json` |
 | `DEAD_LETTER_MAX_BYTES` | Dead letter file size after which it is rotated to `NAME.1` | `10485760` |
 

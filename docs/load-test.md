@@ -4,8 +4,8 @@ How the 1,000 logs per second target was measured (issue 29), what was run and w
 
 ## Method
 
-- **Tool:** `cmd/loadtest`, a load generator written with the Go standard library and checked into this repository (see `go run ./cmd/loadtest -help`). It schedules requests on a fixed pace (`target rate / batch size`), spreads them over round-robin spoofed source IPs in `198.51.100.0/24` and reports accepted logs, status codes and latency percentiles in its summary.
-- **Several source IPs:** the generator sends `X-Forwarded-For` from a rotated pool of 50 addresses with the server started as `TRUSTED_PROXIES=127.0.0.1/32`, so every spoofed address gets its own rate-limit bucket.
+- Tool: `cmd/loadtest`, a load generator written with the Go standard library and checked into this repository (see `go run ./cmd/loadtest -help`). It schedules requests on a fixed pace (`target rate / batch size`), spreads them over round-robin spoofed source IPs inside the 198.51.100.0/24 documentation range and reports accepted logs, status codes and latency percentiles in its summary.
+- Several source IPs: the generator sends `X-Forwarded-For` from a rotated pool of 50 addresses in that subnet — all valid, includable IPs, so the server accepts each one only when `TRUSTED_PROXIES=127.0.0.1/32` names the load generator's socket as a trusted proxy, and otherwise falls back to the socket address. Every spoofed address then gets its own rate-limit bucket.
 - **Target:** the server compiled from `cmd/server` on the same machine (Linux laptop, Go 1.26.3), broker `rabbitmq:3-management` from the compose stack, SQLite in a temp directory (`DB_DIR`).
 - **Accounting:** after each run the queue backlog is watched until it drains, then the stored row delta from `logs_service1.db` is compared against the logs the server accepted, and the dead-letter file is checked.
 
@@ -18,7 +18,7 @@ How the 1,000 logs per second target was measured (issue 29), what was run and w
 | Duration | 30 s |
 | Requests sent / accepted | 300 / 300 (`202 accepted` only) |
 | Sustained ingestion | **1000.0 logs/s, zero rejections** |
-| Response latency | mean 2.5 ms, p50 2.0 ms, p95 5.1 ms, p99 9.5 ms |
+| Response latency | mean 2.9 ms, p50 2.2 ms, p95 7.1 ms, p99 14.1 ms |
 | Storage | all 30,000 accepted logs stored, drained within 47 s of the run ending |
 | Dead letters / write failures / rate-limited | 0 / 0 / 0 |
 | Server footprint | ~26 MB RSS, ~9% CPU (one busy core group, four shared cores otherwise idle) |
@@ -55,9 +55,13 @@ End-to-end accounting for every run below always closed: accepted + rejected = s
 ```bash
 docker compose up -d
 cp configs/.env.example .env   # fill in RABBITMQ_USER and RABBITMQ_PASS
-go run ./cmd/server
-TRUSTED_PROXIES=127.0.0.1/32 must be set for the spoofed X-Forwarded-For to be honored
+```
 
+```bash
+# terminal 1: TRUSTED_PROXIES is required so the spoofed X-Forwarded-For is honored
+TRUSTED_PROXIES=127.0.0.1/32 go run ./cmd/server
+
+# terminal 2
 go run ./cmd/loadtest -target http://localhost:8080 -duration 30s -rate 1000 -batch 100 -source-ips 50 -senders 8
 ```
 
