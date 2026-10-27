@@ -39,6 +39,7 @@ flowchart LR
     rawQueue --> enrich --> route --> rabbitPublisher
     rabbitPublisher -->|"connected"| broker
     rabbitPublisher -->|"publish fails"| fallback
+    fallback -.->|"fallback full: dead letter"| deadLetters
     broker -->|"deliver"| supervisor
     supervisor --> amqpConsumer
     fallback -->|"stored directly, never re-published"| fallbackConsumer
