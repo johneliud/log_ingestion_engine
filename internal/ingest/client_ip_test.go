@@ -11,7 +11,7 @@ func TestResolveClientIP_ReturnsSocketAddressWhenNoTrustedProxyIsConfigured(t *t
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-ForwardedFor", "203.0.113.5")
+	request.Header.Set("X-Forwarded-For", "203.0.113.5")
 	if got := ResolveClientIP(request, nil); got != "192.168.1.10" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "192.168.1.10")
 	}
@@ -23,7 +23,7 @@ func TestResolveClientIP_ReturnsSocketAddressWhenForwardedEntryIsNotAnIP(t *test
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-ForwardedFor", "not-an-ip")
+	request.Header.Set("X-Forwarded-For", "not-an-ip")
 	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "192.168.1.10" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "192.168.1.10")
 	}
@@ -35,7 +35,7 @@ func TestResolveClientIP_PrefersFirstEntryFromXForwardedFor(t *testing.T) {
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-ForwardedFor", "203.0.113.5, 198.51.100.2")
+	request.Header.Set("X-Forwarded-For", "203.0.113.5, 198.51.100.2")
 	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "203.0.113.5" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "203.0.113.5")
 	}
@@ -47,7 +47,7 @@ func TestResolveClientIP_TrimsWhitespaceFromXForwardedForEntry(t *testing.T) {
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-ForwardedFor", "  203.0.113.7  , 198.51.100.3")
+	request.Header.Set("X-Forwarded-For", "  203.0.113.7  , 198.51.100.3")
 	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "203.0.113.7" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "203.0.113.7")
 	}
@@ -59,7 +59,7 @@ func TestResolveClientIP_IgnoresEmptyFirstEntryInXForwardedForList(t *testing.T)
 		Header:     make(http.Header),
 		RemoteAddr: "192.168.1.10:12345",
 	}
-	request.Header.Set("X-ForwardedFor", " , 198.51.100.4")
+	request.Header.Set("X-Forwarded-For", " , 198.51.100.4")
 	if got := ResolveClientIP(request, []string{"192.168.0.0/16"}); got != "192.168.1.10" {
 		t.Errorf("ResolveClientIP() = %q, want %q", got, "192.168.1.10")
 	}

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Returns the source IP from X-ForwardedFor when a trusted proxy forwarded the request and the first forwarded entry is a valid IP, otherwise the socket address host, otherwise unknown. X-ForwardedFor is client-controlled unless a trusted proxy overwrites it.
+// Returns the source IP from X-Forwarded-For when a trusted proxy forwarded the request and the first forwarded entry is a valid IP, otherwise the socket address host, otherwise unknown. X-Forwarded-For is client-controlled unless a trusted proxy overwrites it.
 func ResolveClientIP(request *http.Request, trustedProxies []string) string {
 	if request == nil {
 		return "unknown"
@@ -15,7 +15,7 @@ func ResolveClientIP(request *http.Request, trustedProxies []string) string {
 
 	sourceIPAddress := chooseSocketAddressHost(request)
 
-	if forwardedHeader := request.Header.Get("X-ForwardedFor"); forwardedHeader != "" && hasForwardedFromTrustedProxy(request, trustedProxies) {
+	if forwardedHeader := request.Header.Get("X-Forwarded-For"); forwardedHeader != "" && hasForwardedFromTrustedProxy(request, trustedProxies) {
 		forwardedEntries := strings.Split(forwardedHeader, ",")
 		firstEntry := strings.TrimSpace(forwardedEntries[0])
 		if parsedAddress, parseError := netip.ParseAddr(firstEntry); parseError == nil {
