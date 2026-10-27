@@ -13,8 +13,8 @@ func TestBuildSourceIPAddresses_ReturnsOneAddressPerRequestedSourceIP(t *testing
 	if len(sourceIPAddresses) != 3 {
 		t.Fatalf("source IP count = %d, want 3", len(sourceIPAddresses))
 	}
-	if sourceIPAddresses[0] != "198.51.100.001" || sourceIPAddresses[2] != "198.51.100.003" {
-		t.Errorf("source IPs = %v, want the sequential 198.51.100.0/24 addresses", sourceIPAddresses)
+	if sourceIPAddresses[0] != "198.51.100.1" || sourceIPAddresses[2] != "198.51.100.3" {
+		t.Errorf("source IPs = %v, want the sequential 198.51.100.0/24 addresses without zero padding", sourceIPAddresses)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,6 +67,9 @@ func loadTestSettingsFromFlags() (loadTestSettings, error) {
 	if settings.targetLogsPerSecond <= 0 || settings.logsPerRequest <= 0 || settings.sourceIPCount <= 0 || settings.senderCount <= 0 {
 		return settings, fmt.Errorf("rate, batch, source-ips and senders must all be positive")
 	}
+	if settings.sourceIPCount > maximumSourceIPCount {
+		return settings, fmt.Errorf("source-ips must be at most %d so the last octet stays a valid IPv4 address", maximumSourceIPCount)
+	}
 	requestInterval := time.Duration(float64(time.Second) * float64(settings.logsPerRequest) / float64(settings.targetLogsPerSecond))
 	if requestInterval < minimumRequestInterval {
 		return settings, fmt.Errorf("batch %d wants a %s interval, which is below the %s pacing precision; raise the batch size or lower the rate",
@@ -80,11 +84,14 @@ func loadTestSettingsFromFlags() (loadTestSettings, error) {
 // Requests are paced no tighter than this so the scheduler can keep up.
 const minimumRequestInterval = 500 * time.Microsecond
 
+// The spoofed source addresses fit one 198.51.100.0/24 subnet.
+const maximumSourceIPCount = 254
+
 // Returns the source addresses one run rotates through.
 func buildSourceIPAddresses(sourceIPCount int) []string {
 	sourceIPAddresses := make([]string, 0, sourceIPCount)
 	for sourceIPIndex := range sourceIPCount {
-		sourceIPAddresses = append(sourceIPAddresses, loadTestSourceAddressPrefix+fmt.Sprintf("%03d", sourceIPIndex+1))
+		sourceIPAddresses = append(sourceIPAddresses, loadTestSourceAddressPrefix+strconv.Itoa(sourceIPIndex+1))
 	}
 	return sourceIPAddresses
 }
