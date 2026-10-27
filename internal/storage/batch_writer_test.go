@@ -290,7 +290,9 @@ func TestBatchWriter_RetainsLogsWhenStoreFails(t *testing.T) {
 		t.Fatal("expected the store failure to be reported")
 	}
 
-	batchWriter.FlushAll()
+	if flushError := batchWriter.FlushAll(); flushError == nil {
+		t.Fatal("expected the flush to report the store failure")
+	}
 	if storeAttemptCount != 2 {
 		t.Fatalf("store attempt count = %d, want 2; failed logs must stay buffered", storeAttemptCount)
 	}
@@ -395,7 +397,9 @@ func TestBatchWriter_FlushesDestinationsConcurrently(t *testing.T) {
 
 	flushCompleted := make(chan struct{})
 	go func() {
-		batchWriter.FlushAll()
+		if flushError := batchWriter.FlushAll(); flushError != nil {
+			t.Errorf("flushing the destinations failed: %v", flushError)
+		}
 		close(flushCompleted)
 	}()
 

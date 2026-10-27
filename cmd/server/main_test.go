@@ -1,20 +1,29 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/johneliud/log_ingestion_engine/internal/config"
 	"github.com/johneliud/log_ingestion_engine/internal/metrics"
+	"github.com/johneliud/log_ingestion_engine/internal/model"
 )
 
-const testHTTPPort = 18080
+const (
+	testHTTPPort            = 18080
+	testShutdownGracePeriod = 5 * time.Second
+)
 
 // Returns a configuration that stores everything in a temporary directory and cannot reach the broker.
 func testApplicationConfiguration(t *testing.T) config.ApplicationConfiguration {
@@ -47,6 +56,8 @@ func testApplicationConfiguration(t *testing.T) config.ApplicationConfiguration 
 		DeadLetterMaximumFileSizeInBytes: 1 << 20,
 		MetricsThroughputWindow:          time.Minute,
 		MetricsBacklogTimeout:            10 * time.Millisecond,
+		ShutdownGracePeriod:              testShutdownGracePeriod,
+		PublishTimeout:                   100 * time.Millisecond,
 	}
 }
 
@@ -59,7 +70,7 @@ func newTestServerApplication(t *testing.T, applicationConfiguration config.Appl
 		t.Fatalf("building the application failed: %v", applicationError)
 	}
 	t.Cleanup(func() {
-		if shutdownError := serverApplication.shutdownBackgroundWork(shutdownGracePeriod); shutdownError != nil {
+		if shutdownError := serverApplication.shutdownBackgroundWork(aTestShutdownContext(t)); shutdownError != nil {
 			t.Errorf("stopping the background work failed: %v", shutdownError)
 		}
 	})
@@ -97,6 +108,81 @@ func countStoredLogs(t *testing.T, databaseFilePath string) int {
 		t.Fatalf("counting the stored logs failed: %v", scanError)
 	}
 	return storedLogCount
+}
+
+// Returns the number of rows stored across every destination database.
+func countStoredLogsInEveryDatabase(t *testing.T, databaseDirectoryPath string) int {
+	t.Helper()
+
+	storedLogCount := 0
+	for _, databaseFileName := range []string{config.DatabaseFileService1Name, config.DatabaseFileService2Name, config.DatabaseFileService3Name} {
+		storedLogCount += countStoredLogs(t, filepath.Join(databaseDirectoryPath, databaseFileName))
+	}
+	return storedLogCount
+}
+
+// Returns the number of dead letter entries written to the dead letter file.
+func countDeadLetterEntries(t *testing.T, deadLetterFilePath string) int {
+	t.Helper()
+
+	fileContents, readError := os.ReadFile(deadLetterFilePath)
+	if errors.Is(readError, os.ErrNotExist) {
+		return 0
+	}
+	if readError != nil {
+		t.Fatalf("reading the dead letter file failed: %v", readError)
+	}
+
+	deadLetterEntryCount := 0
+	for fileLine := range strings.SplitSeq(strings.TrimSpace(string(fileContents)), "\n") {
+		if strings.TrimSpace(fileLine) == "" {
+			continue
+		}
+		deadLetterEntryCount++
+	}
+	return deadLetterEntryCount
+}
+
+// Writes the routing rules that send each service to its destination.
+func writeRoutingRules(t *testing.T, routingConfigurationFilePath string, routingRules map[string]string) {
+	t.Helper()
+
+	serializedRules, marshalError := json.Marshal(routingRules)
+	if marshalError != nil {
+		t.Fatalf("marshalling the routing rules failed: %v", marshalError)
+	}
+	if writeError := os.WriteFile(routingConfigurationFilePath, serializedRules, 0o644); writeError != nil {
+		t.Fatalf("writing the routing rules failed: %v", writeError)
+	}
+}
+
+// Returns one request body with a log entry for every service name.
+func logBatchBodyForServices(serviceNames []string) string {
+	logEntries := make([]string, 0, len(serviceNames))
+	for _, serviceName := range serviceNames {
+		logEntries = append(logEntries, fmt.Sprintf(`{"timestamp":"2026-10-26T10:00:00Z","service":%q,"level":"INFO","message":"a log entry for %s"}`, serviceName, serviceName))
+	}
+	return "[" + strings.Join(logEntries, ",") + "]"
+}
+
+// Returns the shutdown context the tests use for the background work.
+func aTestShutdownContext(t *testing.T) context.Context {
+	t.Helper()
+
+	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), testShutdownGracePeriod)
+	t.Cleanup(shutdownContextCancellation)
+	return shutdownContext
+}
+
+// Waits for the pipeline workers to stop after the pipeline work was cancelled.
+func waitForPipelineCompletion(t *testing.T, serverApplication *serverApplication) {
+	t.Helper()
+
+	select {
+	case <-serverApplication.pipelineCompletion:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the pipeline did not stop after its work was cancelled")
+	}
 }
 
 // Reads the metrics snapshot served by the wired router.
@@ -159,7 +245,7 @@ func TestServerApplication_StoresAnAcceptedLogThroughTheFallbackPath(t *testing.
 		t.Fatalf("ingestion status = %d, want %d", responseRecorder.Code, http.StatusAccepted)
 	}
 
-	if shutdownError := serverApplication.shutdownBackgroundWork(shutdownGracePeriod); shutdownError != nil {
+	if shutdownError := serverApplication.shutdownBackgroundWork(aTestShutdownContext(t)); shutdownError != nil {
 		t.Fatalf("stopping the background work failed: %v", shutdownError)
 	}
 
@@ -209,5 +295,117 @@ func TestServerApplication_CountsAcceptedLogsAndRejectedRequestsInTheMetricsSnap
 	}
 	if snapshot.RateLimitedRequests != 1 {
 		t.Errorf("rate limited requests = %d, want 1", snapshot.RateLimitedRequests)
+	}
+}
+
+func TestServerApplication_StoresEveryAcceptedLogOrDeadLettersItWhenTheApplicationShutsDown(t *testing.T) {
+	t.Parallel()
+
+	applicationConfiguration := testApplicationConfiguration(t)
+	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{
+		"claims":   "service1",
+		"payments": "service2",
+		"policy":   "service3",
+	})
+	serverApplication := newTestServerApplication(t, applicationConfiguration)
+
+	acceptedLogCount := 0
+	for _, serviceNames := range [][]string{{"claims", "payments"}, {"policy", "claims"}, {"payments"}} {
+		responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices(serviceNames))
+		if responseRecorder.Code != http.StatusAccepted {
+			t.Fatalf("ingestion status = %d, want %d", responseRecorder.Code, http.StatusAccepted)
+		}
+		acceptedLogCount += len(serviceNames)
+	}
+
+	if shutdownError := serverApplication.shutdownBackgroundWork(aTestShutdownContext(t)); shutdownError != nil {
+		t.Fatalf("stopping the background work failed: %v", shutdownError)
+	}
+
+	storedLogCount := countStoredLogsInEveryDatabase(t, applicationConfiguration.DatabaseDirectoryPath)
+	deadLetterEntryCount := countDeadLetterEntries(t, applicationConfiguration.DeadLetterFilePath)
+	if storedLogCount+deadLetterEntryCount != acceptedLogCount {
+		t.Errorf("stored logs %d plus dead letter entries %d = %d, want the %d accepted logs", storedLogCount, deadLetterEntryCount, storedLogCount+deadLetterEntryCount, acceptedLogCount)
+	}
+	if storedLogCount != acceptedLogCount {
+		t.Errorf("stored log count = %d, want the %d accepted logs", storedLogCount, acceptedLogCount)
+	}
+}
+
+func TestServerApplication_WaitsForTheRunningRequestsBeforeItDrainsTheRawLogs(t *testing.T) {
+	t.Parallel()
+
+	var runningRequests sync.WaitGroup
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	requestFinished := make(chan struct{})
+	blockingHandler := http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		close(requestFinished)
+	})
+	trackedHandler := trackRunningRequests(blockingHandler, &runningRequests)
+	serverApplication := &serverApplication{inFlightRequests: &runningRequests}
+
+	requestServed := make(chan struct{})
+	go func() {
+		trackedHandler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader("")))
+		close(requestServed)
+	}()
+	<-requestStarted
+
+	shutdownContext, shutdownContextCancellation := context.WithTimeout(context.Background(), testShutdownGracePeriod)
+	defer shutdownContextCancellation()
+	waitCompleted := make(chan error, 1)
+	go func() {
+		waitCompleted <- serverApplication.waitForRunningRequests(shutdownContext)
+	}()
+
+	close(releaseRequest)
+	select {
+	case waitError := <-waitCompleted:
+		if waitError != nil {
+			t.Fatalf("waiting for the running requests failed: %v", waitError)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shutdown did not finish waiting for the running request")
+	}
+
+	select {
+	case <-requestFinished:
+	default:
+		t.Fatal("the shutdown finished before the running request returned")
+	}
+	<-requestServed
+}
+
+func TestServerApplication_DeadLettersTheLogsThePipelineCouldNotProcess(t *testing.T) {
+	t.Parallel()
+
+	applicationConfiguration := testApplicationConfiguration(t)
+	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service2"})
+	serverApplication := newTestServerApplication(t, applicationConfiguration)
+
+	serverApplication.cancelPipelineWork()
+	waitForPipelineCompletion(t, serverApplication)
+
+	undrainedLogs := []model.RawLog{
+		{LogEntry: model.LogEntry{Timestamp: "2026-10-26T10:00:00Z", Service: "claims", Level: model.LogLevelInfo, Message: "the first undrained log"}, BatchID: "batch-one", SourceIP: "203.0.113.10", ReceivedAt: time.Now()},
+		{LogEntry: model.LogEntry{Timestamp: "2026-10-26T10:00:00Z", Service: "policy", Level: model.LogLevelInfo, Message: "the second undrained log"}, BatchID: "batch-one", SourceIP: "203.0.113.10", ReceivedAt: time.Now()},
+	}
+	if pushError := serverApplication.rawLogsQueue.PushBatch(undrainedLogs); pushError != nil {
+		t.Fatalf("queueing the undrained logs failed: %v", pushError)
+	}
+
+	if deadLetterError := serverApplication.deadLetterRemainingRawLogs(); deadLetterError != nil {
+		t.Fatalf("dead-lettering the undrained logs failed: %v", deadLetterError)
+	}
+	if closeError := serverApplication.deadLetterWriter.Close(); closeError != nil {
+		t.Fatalf("closing the dead letter writer failed: %v", closeError)
+	}
+
+	deadLetterEntryCount := countDeadLetterEntries(t, applicationConfiguration.DeadLetterFilePath)
+	if deadLetterEntryCount != len(undrainedLogs) {
+		t.Errorf("dead letter entry count = %d, want %d", deadLetterEntryCount, len(undrainedLogs))
 	}
 }

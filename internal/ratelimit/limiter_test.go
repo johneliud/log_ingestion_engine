@@ -75,11 +75,16 @@ func TestPerIPRateLimiterRegistry_StartIdleCleanupStopsOnContext(t *testing.T) {
 	t.Parallel()
 	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
 	registry := NewPerIPRateLimiterRegistry(1000, time.Millisecond, time.Now)
-	registry.StartIdleCleanup(applicationContext, 10*time.Millisecond)
+	cleanupCompletion := registry.StartIdleCleanup(applicationContext, 10*time.Millisecond)
 
 	_, _ = registry.AllowWithoutConsumingCapacity("203.0.113.40")
 	applicationContextCancellation()
-	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-cleanupCompletion:
+	case <-time.After(time.Second):
+		t.Fatal("the idle cleanup goroutine did not stop after the context was cancelled")
+	}
 }
 
 func TestPerIPRateLimiterRegistry_ConcurrentAccessIsSafe(t *testing.T) {

@@ -40,7 +40,9 @@ type destinationDatabase struct {
 
 // Stores enriched logs in one SQLite database per destination.
 type SQLiteLogStore struct {
+	mutex     sync.Mutex
 	databases map[model.Destination]*destinationDatabase
+	isClosed  bool
 }
 
 // Returns a store with one database opened per destination, creating any missing files and tables.
@@ -134,6 +136,14 @@ func (sqliteLogStore *SQLiteLogStore) StoreBatch(destination model.Destination, 
 
 // Closes every open destination database and its insert statement.
 func (sqliteLogStore *SQLiteLogStore) Close() error {
+	sqliteLogStore.mutex.Lock()
+	defer sqliteLogStore.mutex.Unlock()
+
+	if sqliteLogStore.isClosed {
+		return nil
+	}
+	sqliteLogStore.isClosed = true
+
 	var firstCloseError error
 	for _, destinationDatabase := range sqliteLogStore.databases {
 		if closeError := destinationDatabase.insertStatement.Close(); closeError != nil && firstCloseError == nil {

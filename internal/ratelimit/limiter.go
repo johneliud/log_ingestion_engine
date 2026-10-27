@@ -73,10 +73,12 @@ func (perIPRateLimiterRegistry *PerIPRateLimiterRegistry) sweepIdleLimiters(curr
 	}
 }
 
-// Starts the idle cleanup goroutine stopped by the context.
-func (perIPRateLimiterRegistry *PerIPRateLimiterRegistry) StartIdleCleanup(applicationContext context.Context, cleanupInterval time.Duration) {
+// Starts the idle cleanup goroutine stopped by the context and reports when it ends.
+func (perIPRateLimiterRegistry *PerIPRateLimiterRegistry) StartIdleCleanup(applicationContext context.Context, cleanupInterval time.Duration) <-chan struct{} {
+	completed := make(chan struct{})
 	ticker := time.NewTicker(cleanupInterval)
 	go func() {
+		defer close(completed)
 		defer ticker.Stop()
 		for {
 			select {
@@ -87,4 +89,5 @@ func (perIPRateLimiterRegistry *PerIPRateLimiterRegistry) StartIdleCleanup(appli
 			}
 		}
 	}()
+	return completed
 }

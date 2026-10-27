@@ -129,6 +129,10 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("MetricsBacklogTimeout = %s, want %s", applicationConfiguration.MetricsBacklogTimeout, defaultMetricsBacklogTimeout)
 	}
 
+	if applicationConfiguration.ShutdownGracePeriod != defaultShutdownGracePeriod {
+		t.Errorf("ShutdownGracePeriod = %s, want %s", applicationConfiguration.ShutdownGracePeriod, defaultShutdownGracePeriod)
+	}
+
 	expectedRetryBackoffDelays := []time.Duration{time.Second, 5 * time.Second, 10 * time.Second}
 
 	for retryBackoffDelayIndex, expectedRetryBackoffDelay := range expectedRetryBackoffDelays {
@@ -166,6 +170,7 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameDeadLetterMaximumFileSizeInBytes] = "20971520"
 	environmentVariables[environmentNameMetricsThroughputWindow] = "30s"
 	environmentVariables[environmentNameMetricsBacklogTimeout] = "750ms"
+	environmentVariables[environmentNameShutdownGracePeriod] = "45s"
 	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 
 	if configurationError != nil {
@@ -286,6 +291,10 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 
 	if applicationConfiguration.MetricsBacklogTimeout != 750*time.Millisecond {
 		t.Errorf("MetricsBacklogTimeout = %s, want 750ms", applicationConfiguration.MetricsBacklogTimeout)
+	}
+
+	if applicationConfiguration.ShutdownGracePeriod != 45*time.Second {
+		t.Errorf("ShutdownGracePeriod = %s, want 45s", applicationConfiguration.ShutdownGracePeriod)
 	}
 }
 
@@ -422,6 +431,20 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 				environmentVariables[environmentNameTrustedProxies] = "10.0.0.0/8,not-a-prefix"
 			},
 			expectedErrorSubstrings: []string{"TRUSTED_PROXIES", "not a valid CIDR prefix"},
+		},
+		{
+			name: "shutdown grace period is not positive",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameShutdownGracePeriod] = "0s"
+			},
+			expectedErrorSubstrings: []string{"SHUTDOWN_GRACE_PERIOD", "positive duration"},
+		},
+		{
+			name: "shutdown grace period is not a duration",
+			environmentMutation: func(environmentVariables map[string]string) {
+				environmentVariables[environmentNameShutdownGracePeriod] = "eventually"
+			},
+			expectedErrorSubstrings: []string{"SHUTDOWN_GRACE_PERIOD", "not a valid duration"},
 		},
 	}
 	for _, testCase := range testCases {

@@ -46,7 +46,7 @@
 
             <section class="space-y-2">
                 <h2 class="text-lg font-semibold">Architecture</h2>
-                <p class="text-sm text-slate-700">Logs enter through <span class="font-mono">POST /logs</span>, are validated per entry and pushed onto a bounded <span class="font-mono">raw_logs</span> channel. Pipeline workers enrich and route each log before the publisher hands it to RabbitMQ; if publishing fails, the log enters the bounded fallback instead. Consumers acknowledge only after the batch writer stores the log in SQLite, and logs whose retries are exhausted go to the dead-letter file for later replay.</p>
+                <p class="text-sm text-slate-700">Logs enter through <span class="font-mono">POST /logs</span>, are validated per entry and pushed onto a bounded <span class="font-mono">raw_logs</span> channel. Pipeline workers enrich and route each log before the publisher hands it to RabbitMQ. If publishing fails, the log enters the bounded fallback instead. Consumers acknowledge only after the batch writer stores the log in SQLite, and logs whose retries are exhausted go to the dead-letter file for later replay.</p>
             </section>
 
             <section class="rounded-xl bg-slate-50 p-4">

@@ -233,6 +233,26 @@ func TestPublisher_DoesNotCountAMessageWhenTheFallbackIsFull(t *testing.T) {
 	}
 }
 
+func TestPublisher_RejectsTheLogsItReceivesAfterItIsClosed(t *testing.T) {
+	t.Parallel()
+
+	publisher := NewPublisher(config.ApplicationConfiguration{PublishTimeout: time.Second}, 10)
+	publisher.mutex.Lock()
+	publisher.isConnected = true
+	publisher.mutex.Unlock()
+	publisher.publishOperation = func(enrichedLog model.EnrichedLog) error {
+		return nil
+	}
+
+	if closeError := publisher.Close(); closeError != nil {
+		t.Fatalf("closing the publisher failed: %v", closeError)
+	}
+
+	if publishError := publisher.Publish(aQueueTestEnrichedLog("batch-closed")); !errors.Is(publishError, ErrPublisherClosed) {
+		t.Fatalf("publish error = %v, want %v", publishError, ErrPublisherClosed)
+	}
+}
+
 func TestVirtualHostPaths_EscapesTheDefaultAndNamedVirtualHosts(t *testing.T) {
 	t.Parallel()
 

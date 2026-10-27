@@ -25,6 +25,36 @@ func TestRawLogsQueue_PushBatchRejectsWholeBatchOnTimeout(t *testing.T) {
 	}
 }
 
+func TestRawLogsQueue_DrainRemainingLogsClosesTheQueueToEveryProducer(t *testing.T) {
+	t.Parallel()
+	rawLogsQueue := NewRawLogsQueue(2, 50*time.Millisecond)
+
+	rawLogsBodies := []model.RawLog{{BatchID: "b1"}}
+	if pushError := rawLogsQueue.PushBatch(rawLogsBodies); pushError != nil {
+		t.Fatalf("the first batch should fit: %v", pushError)
+	}
+
+	blockedProducerResults := make(chan error, 1)
+	blockedRawLogs := []model.RawLog{{BatchID: "b2"}, {BatchID: "b2"}}
+	go func() {
+		blockedProducerResults <- rawLogsQueue.PushBatch(blockedRawLogs)
+	}()
+
+	undrainedLogs := rawLogsQueue.DrainRemainingLogs()
+	if len(undrainedLogs) != 1 {
+		t.Fatalf("drained log count = %d, want the log that was waiting", len(undrainedLogs))
+	}
+
+	if pushError := <-blockedProducerResults; pushError != ErrQueueOverloaded && pushError != ErrQueueClosed {
+		t.Fatalf("blocked producer error = %v, want rejection (overloaded or closed)", pushError)
+	}
+
+	postDrainRawLogs := []model.RawLog{{BatchID: "b1"}}
+	if pushError := rawLogsQueue.PushBatch(postDrainRawLogs); !errors.Is(pushError, ErrQueueClosed) {
+		t.Fatalf("post-drain producer error = %v, want ErrQueueClosed", pushError)
+	}
+}
+
 func TestRawLogsQueue_PushBatchDrains(t *testing.T) {
 	t.Parallel()
 	rawLogsQueue := NewRawLogsQueue(10, 100*time.Millisecond)
@@ -42,6 +72,26 @@ func TestRawLogsQueue_PushBatchDrains(t *testing.T) {
 		default:
 			t.Fatalf("expected items in channel")
 		}
+	}
+}
+
+func TestRawLogsQueue_DrainRemainingLogsRemovesTheWaitingLogs(t *testing.T) {
+	t.Parallel()
+	rawLogsQueue := NewRawLogsQueue(10, 100*time.Millisecond)
+	batch := []model.RawLog{{BatchID: "first"}, {BatchID: "second"}}
+	if err := rawLogsQueue.PushBatch(batch); err != nil {
+		t.Fatalf("batch should fit")
+	}
+
+	undrainedLogs := rawLogsQueue.DrainRemainingLogs()
+	if len(undrainedLogs) != 2 {
+		t.Fatalf("undrained log count = %d, want 2", len(undrainedLogs))
+	}
+	if undrainedLogs[0].BatchID != "first" || undrainedLogs[1].BatchID != "second" {
+		t.Errorf("undrained logs = %+v, want the queued logs in order", undrainedLogs)
+	}
+	if remainingLogs := rawLogsQueue.DrainRemainingLogs(); len(remainingLogs) != 0 {
+		t.Errorf("undrained log count after the drain = %d, want 0", len(remainingLogs))
 	}
 }
 

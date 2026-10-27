@@ -42,6 +42,7 @@ const (
 	environmentNameDeadLetterMaximumFileSizeInBytes  = "DEAD_LETTER_MAX_BYTES"
 	environmentNameMetricsThroughputWindow           = "METRICS_THROUGHPUT_WINDOW"
 	environmentNameMetricsBacklogTimeout             = "METRICS_BACKLOG_TIMEOUT"
+	environmentNameShutdownGracePeriod               = "SHUTDOWN_GRACE_PERIOD"
 )
 
 const (
@@ -69,6 +70,7 @@ const (
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
 	defaultMetricsThroughputWindow          = time.Minute
 	defaultMetricsBacklogTimeout            = 2 * time.Second
+	defaultShutdownGracePeriod              = 30 * time.Second
 
 	RoutingKeyLogWrite = "log.write"
 
@@ -123,6 +125,7 @@ type ApplicationConfiguration struct {
 	DeadLetterMaximumFileSizeInBytes int
 	MetricsThroughputWindow          time.Duration
 	MetricsBacklogTimeout            time.Duration
+	ShutdownGracePeriod              time.Duration
 }
 
 // Builds the application configuration from the merged process environment and configuration file, returning an error naming the first invalid setting.
@@ -327,6 +330,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, metricsBacklogTimeoutError
 	}
 	applicationConfiguration.MetricsBacklogTimeout = metricsBacklogTimeout
+
+	shutdownGracePeriod, shutdownGracePeriodError := parsePositiveDurationSetting(environmentVariables, environmentNameShutdownGracePeriod, defaultShutdownGracePeriod)
+	if shutdownGracePeriodError != nil {
+		return ApplicationConfiguration{}, shutdownGracePeriodError
+	}
+	applicationConfiguration.ShutdownGracePeriod = shutdownGracePeriod
 
 	validationError := validateConsumerBatchFitsBuffer(applicationConfiguration)
 	if validationError != nil {

@@ -90,16 +90,10 @@ func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilClosed() {
 		}
 	}()
 
-	for {
-		select {
-		case deadLetterEntry, ok := <-deadLetterWriter.entriesChannel:
-			if !ok {
-				deadLetterWriter.drainEntries(&deadLetterFile, &currentFileSizeInBytes)
-				return
-			}
-			deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, deadLetterEntry)
-		}
+	for deadLetterEntry := range deadLetterWriter.entriesChannel {
+		deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, deadLetterEntry)
 	}
+	deadLetterWriter.drainEntries(&deadLetterFile, &currentFileSizeInBytes)
 }
 
 // Writes every entry still queued after cancellation before the writer exits.

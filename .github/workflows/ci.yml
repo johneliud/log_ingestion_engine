@@ -9,6 +9,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      RABBITMQ_USER: ${{ secrets.RABBITMQ_USER }}
+      RABBITMQ_PASS: ${{ secrets.RABBITMQ_PASS }}
+    services:
+      rabbitmq:
+        image: rabbitmq:3-management
+        env:
+          RABBITMQ_DEFAULT_USER: ${{ env.RABBITMQ_USER }}
+          RABBITMQ_DEFAULT_PASS: ${{ env.RABBITMQ_PASS }}
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,6 +33,16 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.3'
+
+      - name: Check the broker credentials
+        id: broker-credentials
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          if [ -z "$RABBITMQ_USER" ] || [ -z "$RABBITMQ_PASS" ]; then
+            echo "The RABBITMQ_USER and RABBITMQ_PASS repository secrets are required for the integration tests."
+            exit 1
+          fi
+          echo "requireBrokerTests=true" >> "$GITHUB_OUTPUT"
 
       - name: Check gofmt
         run: |
@@ -30,4 +56,8 @@ jobs:
         run: go vet ./...
 
       - name: Run tests with race detector
+        env:
+          RABBITMQ_HOST: 127.0.0.1
+          RABBITMQ_PORT: '5672'
+          CI_REQUIRE_BROKER_TESTS: ${{ steps.broker-credentials.outputs.requireBrokerTests == 'true' && '1' || '0' }}
         run: go test ./... -race
