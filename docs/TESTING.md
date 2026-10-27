@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 140 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests.
+All 147 tests across 13 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
 
 ## Static checks before committing
 
@@ -38,7 +38,7 @@ These are the exact gates in `.github/workflows/ci.yml`.
 | `internal/enrich` | Enrichment fields, microsecond timestamp format, IP fallback |
 | `internal/handler` | HTTP handlers: log ingestion, metrics snapshot, root/home page, management-API backlog, dashboard page and assets |
 | `internal/ingest` | Log validation and client IP resolution |
-| `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting, the metrics counters, the graceful shutdown drain, the wait for the running requests and the dead-letter recovery of the logs the pipeline could not process |
+| `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting, the metrics counters, the graceful shutdown drain, the wait for the running requests and the dead-letter recovery of the logs the pipeline could not process. The integration suite in `cmd/server/integration_test.go` covers the full pipeline, the broker outage fallback, the SQLite batching triggers, the retries with the dead-letter contents and rotation, and the graceful shutdown with a real broker |
 | `internal/model` | Contract tests for log levels and destinations |
 | `internal/metrics` | Snapshot counters, error rate, throughput window, fallback backlog counter |
 | `internal/pipeline` | Batch consumer, bounded raw-logs queue, cancellation drain, recovery of the logs left in the queue, dead-lettering of the logs that cannot be routed or published |
@@ -74,9 +74,37 @@ go test ./... -count=1 -race
 | SQLite files | Tests create temporary files under `t.TempDir()` |
 | `.env` file | Not needed for unit tests. Config tests build their own environment maps or use temp files |
 | Network ports | None. HTTP handler tests use `httptest.NewRecorder` |
-| Broker in `cmd/server` tests | Not needed. The wired application is built with an unreachable broker address so the in-memory fallback path is exercised |
+| Broker in `cmd/server` unit tests | Not needed. The wired application is built with an unreachable broker address so the in-memory fallback path is exercised |
+| Broker in `cmd/server` integration tests | Two of the five need it and skip cleanly when it is missing. The other three always run against an unreachable broker |
 | Docker | Not needed for unit tests; only for manual end-to-end runs |
-| Real sleeps | Not used. Time is injected via `WaitForRetryDelay`, `waitForReconnectDelay`, and clock functions |
+| Real sleeps | Not used. Time is injected via `WaitForRetryDelay`, `waitForReconnectDelay`, and clock functions. The integration tests poll a condition on a ticker until a deadline |
+
+## Integration tests
+
+The integration suite lives in `cmd/server/integration_test.go` and wires the whole application exactly like `main` does.
+
+| Test | What it proves | Broker |
+|------|----------------|--------|
+| `TestIntegration_FullPipelineStoresTheEnrichedAndRoutedLogsInTheDestinationDatabases` | A log is enriched, routed to its destination database and stored with the enrichment fields | Required |
+| `TestIntegration_RabbitMQOutageStoresTheAcceptedLogsThroughTheFallback` | An unreachable broker does not lose the accepted logs; the fallback stores them and no dead letter is written | Not needed |
+| `TestIntegration_SQLiteBatchingFlushesAtTheBatchSizeAndAtTheFlushInterval` | The batch size trigger flushes 100 logs without waiting for the interval, and the interval trigger flushes a single log on time | Not needed |
+| `TestIntegration_RetriesAndDeadLettersTheLogsThatCannotBeStored` | A failing store is retried three times, then the dead letter carries the log, the error message, the retry count and the failure time, and the file is rotated | Not needed |
+| `TestIntegration_GracefulShutdownStoresEveryAcceptedLog` | Every accepted log ends up stored, even when the shutdown happens while the logs are still in the broker queues | Required |
+
+Run them on their own:
+
+```bash
+go test ./cmd/server -race -run TestIntegration -v
+```
+
+The broker tests read the broker settings from the environment or from the `.env` file at the repository root, and they skip themselves when the broker cannot be reached:
+
+```bash
+docker compose up -d
+go test ./cmd/server -race -run TestIntegration -v
+```
+
+The broker tests purge the three destination queues before they start, so do not run them against a broker a running instance of the server uses.
 
 ## Test conventions
 
@@ -95,6 +123,8 @@ go test ./... -count=1 -race
 2. `gofmt -l .` fails if any file is unformatted.
 3. `go vet ./...` fails on vet warnings.
 4. `go test ./... -race` fails on any test failure or data race.
+
+CI starts a RabbitMQ service container and passes the credentials to the test step, so the integration tests run against a real broker there. The credentials come from the `RABBITMQ_USER` and `RABBITMQ_PASS` repository secrets; the workflow fails with a readable message when they are missing. The broker tests still skip themselves when the broker cannot be reached, which keeps the suite green on a machine without a broker.
 
 ## Docker broker for manual integration
 

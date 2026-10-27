@@ -186,4 +186,10 @@ go vet ./...
 gofmt -l .
 ```
 
+The integration suite in `cmd/server/integration_test.go` wires the whole application: it covers the full pipeline through RabbitMQ into SQLite, the fallback when the broker is unreachable, the SQLite batch size and flush interval triggers, the write retries with the dead-letter contents and rotation, and the graceful shutdown with a real broker. It runs with the same command as the unit tests and skips the broker tests when RabbitMQ is not available:
+
+```bash
+go test ./cmd/server -race -run TestIntegration -v
+```
+
 Full instructions, package-by-package coverage and CI details are in [`docs/TESTING.md`](docs/TESTING.md).
