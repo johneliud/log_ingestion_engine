@@ -2,7 +2,6 @@ import { NavLink } from 'react-router-dom'
 
 export default function Sidebar() {
   const links = [
-    { to: '/', label: 'Home' },
     { to: '/dashboard', label: 'Dashboard' },
     { to: '/metrics', label: 'Metrics' },
   ]
