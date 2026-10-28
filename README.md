@@ -9,7 +9,7 @@ A Go service that accepts logs over HTTP, validates and enriches them, routes th
 The source diagram lives in [`internal/dashboard/architecture.mmd`](internal/dashboard/architecture.mmd). The home page at `/` renders it with the vendored mermaid 11.6.0 library alongside a project summary, the design decisions and nav links to the dashboard and metrics. Every component receives a single `ApplicationConfiguration` loaded from the configuration file and process environment.
 
 ```mermaid
-flowchart LR
+flowchart TB
     client(["Clients"])
 
     subgraph ingress["HTTP ingress"]
