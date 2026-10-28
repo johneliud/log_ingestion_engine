@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/johneliud/log_ingestion_engine/internal/config"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 	"github.com/johneliud/log_ingestion_engine/internal/queue"
+	"github.com/johneliud/log_ingestion_engine/internal/spool"
 )
 
 const (
@@ -317,6 +319,54 @@ func TestIntegration_FullPipelineStoresTheEnrichedAndRoutedLogsInTheDestinationD
 		if _, parseError := time.Parse("2006-01-02T15:04:05.000000Z07:00", storedLogRow.ReceivedAt); parseError != nil {
 			t.Errorf("stored received at %q is not a microsecond timestamp: %v", storedLogRow.ReceivedAt, parseError)
 		}
+	}
+}
+
+func TestIntegration_ReplaysASpoolLargerThanTheRawLogsQueueCapacity(t *testing.T) {
+	applicationConfiguration := integrationTestConfiguration(t)
+	requireTheBroker(t, applicationConfiguration)
+	purgeTheDestinationQueues(t, applicationConfiguration)
+
+	applicationConfiguration.RawLogsBufferSize = 100
+	applicationConfiguration.ConsumerBatchSize = 50
+	applicationConfiguration.ChannelSendTimeout = 20 * time.Millisecond
+	applicationConfiguration.SpoolFilePath = filepath.Join(t.TempDir(), "ingestion-spool.log")
+	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+
+	// More than twice the queue capacity: a replay that runs before the pipeline consumers would fill the queue and drop the overflow.
+	const spooledLogCount = 250
+	spoolingSpool, spoolError := spool.NewSpool(applicationConfiguration.SpoolFilePath)
+	if spoolError != nil {
+		t.Fatalf("creating the spool failed: %v", spoolError)
+	}
+	spooledLogs := make([]model.RawLog, 0, spooledLogCount)
+	for range spooledLogCount {
+		spooledLogs = append(spooledLogs, model.RawLog{
+			LogEntry: model.LogEntry{
+				Timestamp: "2026-10-28T12:00:00.000000Z",
+				Service:   "claims",
+				Level:     model.LogLevelInfo,
+				Message:   "spooled before the restart",
+			},
+			LogID:      uuid.NewString(),
+			BatchID:    uuid.NewString(),
+			ReceivedAt: time.Now(),
+		})
+	}
+	if appendError := spoolingSpool.Append(spooledLogs); appendError != nil {
+		t.Fatalf("filling the spool failed: %v", appendError)
+	}
+	if closeError := spoolingSpool.Close(); closeError != nil {
+		t.Fatalf("closing the spool failed: %v", closeError)
+	}
+
+	newTestServerApplication(t, applicationConfiguration)
+
+	databaseFilePath := filepath.Join(applicationConfiguration.DatabaseDirectoryPath, config.DatabaseFileService1Name)
+	waitForStoredLogCount(t, databaseFilePath, "claims", spooledLogCount)
+
+	if deadLetterEntryCount := len(readDeadLetterEntries(t, applicationConfiguration.DeadLetterFilePath)); deadLetterEntryCount != 0 {
+		t.Errorf("dead letter entry count = %d, want 0", deadLetterEntryCount)
 	}
 }
 

@@ -29,6 +29,9 @@ import (
 
 const minimumRateLimiterIdleTimeout = time.Second
 
+// The delay between two attempts to push a spooled chunk into a full pipeline.
+const replayRetryDelay = 50 * time.Millisecond
+
 // Names one background component and the channel that reports when it stops.
 type backgroundWork struct {
 	name       string
@@ -128,12 +131,17 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		return nil, routerError
 	}
 
-	publisher := queue.NewPublisher(applicationConfiguration, applicationConfiguration.RawLogsBufferSize, queue.WithPublishedMessageRecorder(metricsRegistry))
+	publisher := queue.NewPublisher(
+		applicationConfiguration,
+		applicationConfiguration.RawLogsBufferSize,
+		queue.WithPublishedMessageRecorder(metricsRegistry),
+		queue.WithPublishSessionCount(applicationConfiguration.PipelineWorkerCount),
+	)
 
 	deadLetterWriter := storage.NewDeadLetterWriter(applicationConfiguration)
 
 	batchConsumer := pipeline.NewBatchConsumer(pipeline.BatchConsumerDependencies{
-		RawLogsChannel:     rawLogsQueue.RawLogsChannel(),
+		RawLogsQueue:       rawLogsQueue,
 		ConsumerBatchSize:  applicationConfiguration.ConsumerBatchSize,
 		WorkerCount:        applicationConfiguration.PipelineWorkerCount,
 		Enricher:           logEnricher,
@@ -200,21 +208,15 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	flushTrigger, flushTriggerCompletion := startFlushTrigger(storageContext, applicationConfiguration.WriteFlushInterval)
 
+	// Start the pipeline before replaying the spool so replayed logs drain as they are pushed; replaying into a queue with no consumers would fill it and drop every log beyond its capacity.
+	pipelineCompletion := batchConsumer.Start(pipelineContext)
+
 	unackedSpooledLogs, replayError := ingestionSpool.Unacked()
 	if replayError != nil {
 		slog.Error("replaying spooled logs failed", "error", replayError)
 	}
-	for chunkStart := 0; chunkStart < len(unackedSpooledLogs); chunkStart += applicationConfiguration.ConsumerBatchSize {
-		chunkEnd := chunkStart + applicationConfiguration.ConsumerBatchSize
-		if chunkEnd > len(unackedSpooledLogs) {
-			chunkEnd = len(unackedSpooledLogs)
-		}
-		if pushError := rawLogsQueue.PushBatch(unackedSpooledLogs[chunkStart:chunkEnd]); pushError != nil {
-			slog.Error("replaying spooled logs into the pipeline failed", "error", pushError, "chunk_start", chunkStart, "chunk_end", chunkEnd)
-		}
-	}
+	replaySpooledLogs(rawLogsQueue, unackedSpooledLogs, applicationConfiguration.ConsumerBatchSize, pipelineContext)
 
-	pipelineCompletion := batchConsumer.Start(pipelineContext)
 	backgroundCompletions := []backgroundWork{
 		{name: "the publisher reconnect loop", completion: publisher.RunReconnectLoop(storageContext)},
 		{name: "the batch writer", completion: batchWriter.Run(storageContext, flushTrigger)},
@@ -255,12 +257,29 @@ func trackRunningRequests(next http.Handler, runningRequests *sync.WaitGroup) ht
 	})
 }
 
+// Replays the spooled logs into the pipeline. The logs were already accepted from their clients, so the replay waits for the pipeline to free capacity instead of dropping them.
+func replaySpooledLogs(rawLogsQueue *pipeline.RawLogsQueue, spooledLogs []model.RawLog, chunkSize int, applicationContext context.Context) {
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	for chunkStart := 0; chunkStart < len(spooledLogs); chunkStart += chunkSize {
+		chunkEnd := chunkStart + chunkSize
+		if chunkEnd > len(spooledLogs) {
+			chunkEnd = len(spooledLogs)
+		}
+		if pushError := rawLogsQueue.PushBatchWhenCapacityFrees(applicationContext, spooledLogs[chunkStart:chunkEnd]); pushError != nil {
+			slog.Error("replaying spooled logs into the pipeline failed", "error", pushError, "chunk_start", chunkStart, "chunk_end", chunkEnd)
+			return
+		}
+	}
+}
+
 // Builds the request router with the ingestion and metrics API routes wired.
 func buildRequestRouter(applicationConfiguration config.ApplicationConfiguration, ingestionHandler http.Handler, metricsRegistry *metrics.Metrics) *http.ServeMux {
 	requestRouter := http.NewServeMux()
 	requestRouter.Handle("POST /logs", ingestionHandler)
 	requestRouter.HandleFunc("GET /metrics.json", handler.NewMetricsHandler(metricsRegistry, applicationConfiguration))
-	requestRouter.HandleFunc("GET /metrics/events", handler.NewMetricsEventsHandler(metricsRegistry, applicationConfiguration.CorsAllowedOrigins))
+	requestRouter.HandleFunc("GET /metrics/events", handler.NewMetricsEventsHandler(metricsRegistry, applicationConfiguration))
 	return requestRouter
 }
 
