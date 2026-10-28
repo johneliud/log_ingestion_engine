@@ -1,11 +1,8 @@
 package router
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 )
@@ -17,7 +14,7 @@ type ServiceRouter struct {
 }
 
 // Returns a new service router.
-func NewServiceRouter(routingConfigurationFilePath string, defaultDestination string) (*ServiceRouter, error) {
+func NewServiceRouter(rules map[string]string, defaultDestination string) (*ServiceRouter, error) {
 	routingRules := make(map[string]model.Destination)
 	defaultDestinationValue := model.Destination(defaultDestination)
 	if defaultDestinationValue == "" {
@@ -27,28 +24,14 @@ func NewServiceRouter(routingConfigurationFilePath string, defaultDestination st
 		return nil, fmt.Errorf("unknown default destination %q", defaultDestination)
 	}
 
-	if routingConfigurationFilePath == "" {
-		return &ServiceRouter{rules: routingRules, defaultDestination: defaultDestinationValue}, nil
-	}
-
-	fileContents, fileError := os.ReadFile(routingConfigurationFilePath)
-	if fileError != nil {
-		if errors.Is(fileError, os.ErrNotExist) {
-			return &ServiceRouter{rules: routingRules, defaultDestination: defaultDestinationValue}, nil
+	if rules != nil {
+		for serviceName, destinationName := range rules {
+			dest := model.Destination(destinationName)
+			if !isValidDestination(dest) {
+				return nil, fmt.Errorf("unknown destination %q for service %q", destinationName, serviceName)
+			}
+			routingRules[serviceName] = dest
 		}
-		return nil, fmt.Errorf("reading routing configuration file: %w", fileError)
-	}
-
-	var routingConfiguration map[string]string
-	if unmarshalError := json.Unmarshal(fileContents, &routingConfiguration); unmarshalError != nil {
-		return nil, fmt.Errorf("parsing routing configuration file: %w", unmarshalError)
-	}
-
-	for serviceName, destinationName := range routingConfiguration {
-		if !isValidDestination(model.Destination(destinationName)) {
-			return nil, fmt.Errorf("unknown destination %q for service %q", destinationName, serviceName)
-		}
-		routingRules[serviceName] = model.Destination(destinationName)
 	}
 
 	return &ServiceRouter{rules: routingRules, defaultDestination: defaultDestinationValue}, nil
