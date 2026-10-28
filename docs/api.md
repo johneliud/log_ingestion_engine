@@ -107,16 +107,6 @@ An entry may have multiple field errors when more than one field fails validatio
 | `message`   | Must not be empty                              | `message is required`                                      |
 | `message`   | At most 10,000 characters                      | `message must be at most 10000 characters`               |
 
-## GET /metrics
-
-Serves the metrics page: an HTML view of every runtime counter as plain numbers, with the accepted logs grouped by level and by service. The page polls `GET /metrics.json` every five seconds and renders the snapshot it receives; it never fails with a non-200 status.
-
-### Responses
-
-| Status | Situation      | Body shape |
-|--------|----------------|------------|
-| 200    | `GET /metrics` | The metrics page (`text/html`) |
-
 ## GET /metrics.json
 
 Returns a snapshot of the service's runtime metrics as JSON. The endpoint never authenticates, never fails with a non-200 status for metric reasons, and refreshes `queue_backlog` on every request.
@@ -167,8 +157,7 @@ When the management API URL is not configured, unreachable, or rejects the reque
 
 | Method | Path                 | Body shape |
 |--------|----------------------|------------|
-| GET    | `/`                  | The home page with the architecture diagram (`text/html`) |
-| GET    | `/dashboard`         | The dashboard page (`text/html`) |
-| GET    | `/dashboard/…`       | The vendored dashboard assets (`text/css`, `application/javascript`, `font/woff2`, `image/svg+xml`) |
 
 Unknown paths return `404` and a wrong method on a known path returns `405`.
+
+The user interface is served by the React frontend in `frontend/` (Vite dev server or `npm run preview`), not by the Go backend. The backend exposes only the ingestion API (`POST /logs`) and the metrics snapshot (`GET /metrics.json`).

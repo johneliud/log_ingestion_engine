@@ -14,7 +14,7 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 | Variable | What it does | Default |
 |----------|--------------|---------|
 | `CONFIG_FILE_PATH` | Where the optional configuration file loads from | `.env` |
-| `HTTP_PORT` | TCP port `POST /logs`, `/metrics` and `/dashboard` listen on (1024–65535) | `8080` |
+| `HTTP_PORT` | TCP port `POST /logs` and `GET /metrics.json` listen on (1024–65535) | `8080` |
 | `APP_ENV` | Environment name embedded by the enricher into each stored row (the enricher writes it into `env` for every stored row) | `production` |
 | `MAX_BODY_BYTES` | Largest accepted request body in bytes; larger batches fail with the body-too-large error | `1048576` |
 | `TRUSTED_PROXIES` | Comma-separated CIDR prefixes allowed to forward `X-Forwarded-For`; empty means the header is ignored and the socket address decides | *(empty)* |
@@ -62,6 +62,7 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 | `RETRY_BACKOFFS` | Comma-separated write retry delays, one retry attempt per entry; the log is dead-lettered after the last retry fails | `1s,5s,10s` |
 | `DEAD_LETTER_PATH` | Newline-delimited JSON file for logs whose write retries were exhausted | `logs-failed.json` |
 | `DEAD_LETTER_MAX_BYTES` | Dead letter file size after which it is rotated to `NAME.1` | `10485760` |
+| `SPOOL_PATH` | Durable write-ahead spool file for accepted logs; written and fsynced before `POST /logs` returns `202`, replayed on startup to recover any unacknowledged entry | `ingestion-spool.log` |
 
 ## Metrics, dashboard and shutdown
 

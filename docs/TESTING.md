@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 152 tests across 14 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
+All 148 tests across 15 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
 
 ## Static checks before committing
 
@@ -36,8 +36,9 @@ These are the exact gates in `.github/workflows/ci.yml`.
 |---------|---------------|
 | `internal/config` | Environment parsing, file loading, validation, defaults |
 | `internal/enrich` | Enrichment fields, microsecond timestamp format, IP fallback |
-| `internal/handler` | HTTP handlers: log ingestion, metrics snapshot, root/home page, management-API backlog, dashboard page and assets |
+| `internal/handler` | HTTP handlers: log ingestion and JSON metrics snapshot (`POST /logs`, `GET /metrics.json`) |
 | `internal/ingest` | Log validation and client IP resolution |
+| `internal/spool` | Durable write-ahead spool: append+fsync before `202`, ack after storage/dead-letter, unacked replay on startup, compaction |
 | `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting, the metrics counters, the graceful shutdown drain, the wait for the running requests and the dead-letter recovery of the logs the pipeline could not process. The integration suite in `cmd/server/integration_test.go` covers the full pipeline, the broker outage fallback, the SQLite batching triggers, the retries with the dead-letter contents and rotation, and the graceful shutdown with a real broker |
 | `internal/model` | Contract tests for log levels and destinations |
 | `internal/metrics` | Snapshot counters, error rate, throughput window, fallback backlog counter |
