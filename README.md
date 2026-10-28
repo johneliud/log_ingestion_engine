@@ -100,7 +100,7 @@ Go dependencies resolve from `go.mod` automatically on the first build.
 
 1. `go run ./cmd/server`. The server listens on `HTTP_PORT` (default `8080`) and exposes `POST /logs` and `GET /metrics.json`. It shuts down cleanly on interrupt.
 2. Confirm it is up with `curl -s -i localhost:8080/metrics.json`.
-3. Start the frontend: `cd frontend && npm install && npm run dev`. The Vite dev server proxies API calls to `localhost:8080` and serves the home page, dashboard and metrics.
+3. Start the frontend: `cd frontend && npm install && npm run dev`. The Vite dev server proxies API calls to `localhost:8080` and serves the home page, dashboard and metrics. Set `VITE_API_BASE_URL` in `frontend/.env` to point at a different backend URL if needed.
 3. Configuration auto-loading: The file path is `.env` in the working directory overridable with `CONFIG_FILE_PATH`; values already set in the environment always win.
 
 `cmd/server` is the composition root which builds the rate limiter, ingestion handler, pipeline workers, publisher, consumers, batch writer, SQLite store and dead-letter writer from the configuration, starts them as background work and stops them in order.
@@ -202,6 +202,12 @@ cd frontend
 npm install
 npm run dev        # Vite dev server on http://localhost:5173
 npm run build      # production build to frontend/dist/
+```
+
+Configure the backend URL with `VITE_API_BASE_URL` in a `frontend/.env` file (defaults to `http://localhost:8080`):
+
+```bash
+echo "VITE_API_BASE_URL=http://localhost:8080" > frontend/.env
 ```
 
 The frontend uses Tailwind CSS, Space Grotesk (from the Google Fonts CDN) and React Router for navigation. It charts throughput and error rate with Chart.js and renders the architecture diagram with Mermaid. Metrics stream live through server-sent events. The diagram source is [`frontend/public/architecture.mmd`](frontend/public/architecture.mmd).

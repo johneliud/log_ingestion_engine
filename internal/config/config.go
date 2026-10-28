@@ -44,6 +44,7 @@ const (
 	environmentNameMetricsBacklogTimeout             = "METRICS_BACKLOG_TIMEOUT"
 	environmentNameShutdownGracePeriod               = "SHUTDOWN_GRACE_PERIOD"
 	environmentNameSpoolFilePath                     = "SPOOL_PATH"
+	environmentNameCorsAllowedOrigins                = "CORS_ALLOWED_ORIGINS"
 )
 
 const (
@@ -126,6 +127,7 @@ type ApplicationConfiguration struct {
 	DeadLetterFilePath               string
 	DeadLetterMaximumFileSizeInBytes int
 	SpoolFilePath                    string
+	CorsAllowedOrigins               []string
 	MetricsThroughputWindow          time.Duration
 	MetricsBacklogTimeout            time.Duration
 	ShutdownGracePeriod              time.Duration
@@ -328,6 +330,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.SpoolFilePath = spoolFilePath
 
+	corsAllowedOrigins, corsAllowedOriginsError := parseStringListSetting(environmentVariables, environmentNameCorsAllowedOrigins, nil)
+	if corsAllowedOriginsError != nil {
+		return ApplicationConfiguration{}, corsAllowedOriginsError
+	}
+	applicationConfiguration.CorsAllowedOrigins = corsAllowedOrigins
+
 	metricsThroughputWindow, metricsThroughputWindowError := parsePositiveDurationSetting(environmentVariables, environmentNameMetricsThroughputWindow, defaultMetricsThroughputWindow)
 	if metricsThroughputWindowError != nil {
 		return ApplicationConfiguration{}, metricsThroughputWindowError
@@ -467,6 +475,24 @@ func parseCIDRListSetting(environmentVariables map[string]string, settingName st
 			return nil, fmt.Errorf("environment variable %s contains value %q, which is not a valid CIDR prefix: %w", settingName, trimmedSettingEntry, parseError)
 		}
 		parsedSettingValues = append(parsedSettingValues, trimmedSettingEntry)
+	}
+	return parsedSettingValues, nil
+}
+
+// Returns the comma-separated strings for the setting, falling back to the default when empty.
+func parseStringListSetting(environmentVariables map[string]string, settingName string, defaultValue []string) ([]string, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return defaultValue, nil
+	}
+
+	rawSettingValues := strings.Split(rawSettingValue, ",")
+	parsedSettingValues := make([]string, 0, len(rawSettingValues))
+	for _, rawSettingEntry := range rawSettingValues {
+		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
+		if trimmedSettingEntry != "" {
+			parsedSettingValues = append(parsedSettingValues, trimmedSettingEntry)
+		}
 	}
 	return parsedSettingValues, nil
 }

@@ -71,6 +71,7 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 | `METRICS_THROUGHPUT_WINDOW` | Window over which `GET /metrics.json` throughput is averaged | `1m` |
 | `METRICS_BACKLOG_TIMEOUT` | Time budget for one management-API call when refreshing `queue_backlog` | `2s` |
 | `SHUTDOWN_GRACE_PERIOD` | Single deadline shared by every graceful shutdown phase | `30s` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated list of origins allowed to consume `GET /metrics/events`. Empty allows all origins | *(empty)* |
 
 ## Fixed names (not overridable)
 

@@ -260,7 +260,7 @@ func buildRequestRouter(applicationConfiguration config.ApplicationConfiguration
 	requestRouter := http.NewServeMux()
 	requestRouter.Handle("POST /logs", ingestionHandler)
 	requestRouter.HandleFunc("GET /metrics.json", handler.NewMetricsHandler(metricsRegistry, applicationConfiguration))
-	requestRouter.HandleFunc("GET /metrics/events", handler.NewMetricsEventsHandler(metricsRegistry))
+	requestRouter.HandleFunc("GET /metrics/events", handler.NewMetricsEventsHandler(metricsRegistry, applicationConfiguration.CorsAllowedOrigins))
 	return requestRouter
 }
 
