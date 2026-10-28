@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,16 +17,27 @@ type Snapshot struct {
 	LogsByService       map[string]uint64 `json:"logs_by_service"`
 	ErrorRate           float64           `json:"error_rate"`
 	Throughput          float64           `json:"throughput"`
+	LogsPerSecond       float64           `json:"logs_per_second"`
+	ThroughputHistory   []HistoryPoint    `json:"throughput_history"`
+	ErrorRateHistory    []HistoryPoint    `json:"error_rate_history"`
 	QueueBacklog        int               `json:"queue_backlog"`
 	RateLimitedRequests uint64            `json:"rate_limited_requests"`
 	DeadLetteredLogs    uint64            `json:"dead_lettered_logs"`
 	WriteFailures       uint64            `json:"write_failures"`
 }
 
+// Holds one timestamped sample of a derived metric for the dashboard history charts.
+type HistoryPoint struct {
+	Time  string  `json:"t"`
+	Value float64 `json:"y"`
+}
+
 const (
 	defaultThroughputWindow = time.Minute
 	maximumThroughputWindow = time.Hour
 	broadcastInterval       = 200 * time.Millisecond
+	historySampleInterval   = 2 * time.Second
+	maximumHistoryPoints    = 90
 )
 
 // Owns every metric counter and the sliding throughput window used to compute logs per second.
@@ -44,6 +56,11 @@ type Metrics struct {
 	lastThroughputTime    time.Time
 	hasRecordedThroughput bool
 	currentTimeProvider   func() time.Time
+
+	throughputHistory     []HistoryPoint
+	errorRateHistory      []HistoryPoint
+	lastHistorySampleTime time.Time
+	hasSampledHistory     bool
 
 	subscribers    map[chan Snapshot]struct{}
 	subscriberMu   sync.Mutex
@@ -124,10 +141,13 @@ func (metrics *Metrics) RecordWriteFailure() {
 	metrics.notify()
 }
 
-// Updates the queue backlog count sourced from the RabbitMQ management API.
+// Updates the queue backlog count sourced from the RabbitMQ management API, leaving the snapshot untouched when the value did not change.
 func (metrics *Metrics) SetQueueBacklog(backlog int) {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
+	if metrics.queueBacklog == backlog {
+		return
+	}
 	metrics.queueBacklog = backlog
 	metrics.dirty.Store(true)
 	metrics.notify()
@@ -185,15 +205,8 @@ func (metrics *Metrics) Snapshot() Snapshot {
 	logsByService := make(map[string]uint64, len(metrics.logsByService))
 	maps.Copy(logsByService, metrics.logsByService)
 
-	errorRate := float64(0)
-	if metrics.totalLogsReceived > 0 {
-		errorRate = float64(metrics.logsByLevel[model.LogLevelError]) / float64(metrics.totalLogsReceived)
-	}
-
-	throughput := float64(0)
-	if metrics.hasRecordedThroughput {
-		throughput = float64(metrics.throughputWindowLogs) / metrics.throughputWindow.Seconds()
-	}
+	errorRate := metrics.currentErrorRate()
+	throughput := metrics.currentThroughput()
 
 	return Snapshot{
 		TotalLogsReceived:   metrics.totalLogsReceived,
@@ -201,11 +214,30 @@ func (metrics *Metrics) Snapshot() Snapshot {
 		LogsByService:       logsByService,
 		ErrorRate:           errorRate,
 		Throughput:          throughput,
+		LogsPerSecond:       throughput,
+		ThroughputHistory:   slices.Clone(metrics.throughputHistory),
+		ErrorRateHistory:    slices.Clone(metrics.errorRateHistory),
 		QueueBacklog:        metrics.queueBacklog,
 		RateLimitedRequests: metrics.rateLimitedRequests,
 		DeadLetteredLogs:    metrics.deadLetteredLogs,
 		WriteFailures:       metrics.writeFailures,
 	}
+}
+
+// Returns the share of received logs that were logged at the ERROR level.
+func (metrics *Metrics) currentErrorRate() float64 {
+	if metrics.totalLogsReceived == 0 {
+		return 0
+	}
+	return float64(metrics.logsByLevel[model.LogLevelError]) / float64(metrics.totalLogsReceived)
+}
+
+// Returns the average logs per second over the configured throughput window.
+func (metrics *Metrics) currentThroughput() float64 {
+	if !metrics.hasRecordedThroughput {
+		return 0
+	}
+	return float64(metrics.throughputWindowLogs) / metrics.throughputWindow.Seconds()
 }
 
 // Returns a channel that receives a snapshot whenever any metric changes.
@@ -220,8 +252,8 @@ func (metrics *Metrics) Subscribe() chan Snapshot {
 // Removes a subscriber channel and closes it.
 func (metrics *Metrics) Unsubscribe(ch chan Snapshot) {
 	metrics.subscriberMu.Lock()
+	defer metrics.subscriberMu.Unlock()
 	delete(metrics.subscribers, ch)
-	metrics.subscriberMu.Unlock()
 	close(ch)
 }
 
@@ -233,23 +265,18 @@ func (metrics *Metrics) notify() {
 	}
 }
 
-// Sends the current snapshot to every subscriber when at least one metric has changed since the last broadcast.
+// Sends the current snapshot to every subscriber when at least one metric has changed since the last broadcast. The sends happen under the subscriber lock so a concurrent Unsubscribe can never close a channel mid-send; every send is non-blocking, so a slow subscriber never stalls the broadcast.
 func (metrics *Metrics) broadcastIfDirty() {
 	metrics.subscriberMu.Lock()
+	defer metrics.subscriberMu.Unlock()
 	if !metrics.dirty.Load() || len(metrics.subscribers) == 0 {
 		metrics.dirty.Store(false)
-		metrics.subscriberMu.Unlock()
 		return
 	}
 	metrics.dirty.Store(false)
-	subscribers := make([]chan Snapshot, 0, len(metrics.subscribers))
-	for ch := range metrics.subscribers {
-		subscribers = append(subscribers, ch)
-	}
-	metrics.subscriberMu.Unlock()
 
 	snapshot := metrics.Snapshot()
-	for _, ch := range subscribers {
+	for ch := range metrics.subscribers {
 		select {
 		case ch <- snapshot:
 		default:
@@ -265,8 +292,10 @@ func (metrics *Metrics) broadcastLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			metrics.sampleHistoryIfDue()
 			metrics.broadcastIfDirty()
 		case <-metrics.changeNotifier:
+			metrics.sampleHistoryIfDue()
 			metrics.broadcastIfDirty()
 		}
 	}
@@ -286,4 +315,30 @@ func (metrics *Metrics) advanceThroughputWindowTo(currentTime time.Time) {
 
 	metrics.throughputWindowLogs = 0
 	metrics.lastThroughputTime = currentTime
+}
+
+// Appends one timestamped sample of the throughput and the error rate to the history buffers, at most once per history sample interval, keeping only the most recent samples.
+func (metrics *Metrics) sampleHistoryIfDue() {
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+
+	currentTime := metrics.currentTimeProvider()
+	if metrics.hasSampledHistory && currentTime.Sub(metrics.lastHistorySampleTime) < historySampleInterval {
+		return
+	}
+	metrics.lastHistorySampleTime = currentTime
+	metrics.hasSampledHistory = true
+
+	sampleTime := currentTime.UTC().Format(time.RFC3339)
+	metrics.advanceThroughputWindowTo(currentTime)
+	metrics.throughputHistory = appendHistoryPoint(metrics.throughputHistory, HistoryPoint{Time: sampleTime, Value: metrics.currentThroughput()})
+	metrics.errorRateHistory = appendHistoryPoint(metrics.errorRateHistory, HistoryPoint{Time: sampleTime, Value: metrics.currentErrorRate()})
+}
+
+// Appends one history point, dropping the oldest point when the buffer is full.
+func appendHistoryPoint(historyPoints []HistoryPoint, historyPoint HistoryPoint) []HistoryPoint {
+	if len(historyPoints) >= maximumHistoryPoints {
+		historyPoints = historyPoints[1:]
+	}
+	return append(historyPoints, historyPoint)
 }
