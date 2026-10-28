@@ -4,47 +4,47 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 const (
-	environmentNameHTTPPort                          = "HTTP_PORT"
-	environmentNameRateLimitPerSecond                = "RATE_LIMIT"
-	environmentNameRateLimitCleanupInterval          = "RATE_LIMIT_CLEANUP_INTERVAL"
-	environmentNameRawLogsBufferSize                 = "RAW_LOGS_BUFFER"
-	environmentNameConsumerBatchSize                 = "CONSUMER_BATCH_SIZE"
-	environmentNameChannelSendTimeout                = "CHANNEL_SEND_TIMEOUT"
-	environmentNameMaximumBodySizeInBytes            = "MAX_BODY_BYTES"
-	environmentNameApplicationEnvironment            = "APP_ENV"
-	environmentNameRoutingConfigurationFilePath      = "ROUTING_CONFIG_PATH"
-	environmentNameDefaultDestination                = "DEFAULT_DESTINATION"
-	environmentNameTrustedProxies                    = "TRUSTED_PROXIES"
-	environmentNameRabbitMQHost                      = "RABBITMQ_HOST"
-	environmentNameRabbitMQPort                      = "RABBITMQ_PORT"
-	environmentNameRabbitMQUsername                  = "RABBITMQ_USER"
-	environmentNameRabbitMQPassword                  = "RABBITMQ_PASS"
-	environmentNameRabbitMQManagementURL             = "RABBITMQ_MGMT_URL"
-	environmentNameRabbitMQVirtualHost               = "RABBITMQ_VHOST"
-	environmentNameRabbitMQUseTLS                    = "RABBITMQ_USE_TLS"
-	environmentNamePublishTimeout                    = "PUBLISH_TIMEOUT"
+	environmentNameHTTPPort                    = "HTTP_PORT"
+	environmentNameRateLimitPerSecond          = "RATE_LIMIT"
+	environmentNameRateLimitCleanupInterval    = "RATE_LIMIT_CLEANUP_INTERVAL"
+	environmentNameRawLogsBufferSize           = "RAW_LOGS_BUFFER"
+	environmentNameConsumerBatchSize           = "CONSUMER_BATCH_SIZE"
+	environmentNameChannelSendTimeout          = "CHANNEL_SEND_TIMEOUT"
+	environmentNameMaximumBodySizeInBytes      = "MAX_BODY_BYTES"
+	environmentNameApplicationEnvironment      = "APP_ENV"
+	environmentNameRoutingRules                = "ROUTING_RULES"
+	environmentNameDefaultDestination          = "DEFAULT_DESTINATION"
+	environmentNameTrustedProxies              = "TRUSTED_PROXIES"
+	environmentNameRabbitMQHost                = "RABBITMQ_HOST"
+	environmentNameRabbitMQPort                = "RABBITMQ_PORT"
+	environmentNameRabbitMQUsername            = "RABBITMQ_USER"
+	environmentNameRabbitMQPassword            = "RABBITMQ_PASS"
+	environmentNameRabbitMQManagementURL       = "RABBITMQ_MGMT_URL"
+	environmentNameRabbitMQVirtualHost         = "RABBITMQ_VHOST"
+	environmentNameRabbitMQUseTLS              = "RABBITMQ_USE_TLS"
+	environmentNamePublishTimeout              = "PUBLISH_TIMEOUT"
 	environmentNameRabbitMQReconnectBackoffDelayList = "RABBITMQ_RECONNECT_BACKOFFS"
-	environmentNamePipelineWorkerCount               = "PIPELINE_WORKER_COUNT"
-	environmentNameWriteBatchSize                    = "WRITE_BATCH_SIZE"
-	environmentNameWriteFlushInterval                = "WRITE_FLUSH_INTERVAL"
-	environmentNameDatabaseDirectoryPath             = "DB_DIR"
-	environmentNameDatabaseBusyTimeout               = "DB_BUSY_TIMEOUT"
-	environmentNameConfigurationFilePath             = "CONFIG_FILE_PATH"
-	environmentNameWriteRetryBackoffDelayList        = "RETRY_BACKOFFS"
-	environmentNameDeadLetterFilePath                = "DEAD_LETTER_PATH"
-	environmentNameDeadLetterMaximumFileSizeInBytes  = "DEAD_LETTER_MAX_BYTES"
-	environmentNameMetricsThroughputWindow           = "METRICS_THROUGHPUT_WINDOW"
-	environmentNameMetricsBacklogTimeout             = "METRICS_BACKLOG_TIMEOUT"
-	environmentNameShutdownGracePeriod               = "SHUTDOWN_GRACE_PERIOD"
-	environmentNameSpoolFilePath                     = "SPOOL_PATH"
-	environmentNameCorsAllowedOrigins                = "CORS_ALLOWED_ORIGINS"
+	environmentNamePipelineWorkerCount         = "PIPELINE_WORKER_COUNT"
+	environmentNameWriteBatchSize              = "WRITE_BATCH_SIZE"
+	environmentNameWriteFlushInterval          = "WRITE_FLUSH_INTERVAL"
+	environmentNameDatabaseDirectoryPath       = "DB_DIR"
+	environmentNameDatabaseBusyTimeout         = "DB_BUSY_TIMEOUT"
+	environmentNameWriteRetryBackoffDelayList  = "RETRY_BACKOFFS"
+	environmentNameDeadLetterFilePath          = "DEAD_LETTER_PATH"
+	environmentNameDeadLetterMaximumFileSizeInBytes = "DEAD_LETTER_MAX_BYTES"
+	environmentNameMetricsThroughputWindow     = "METRICS_THROUGHPUT_WINDOW"
+	environmentNameMetricsBacklogTimeout       = "METRICS_BACKLOG_TIMEOUT"
+	environmentNameShutdownGracePeriod         = "SHUTDOWN_GRACE_PERIOD"
+	environmentNameSpoolFilePath               = "SPOOL_PATH"
+	environmentNameCorsAllowedOrigins          = "CORS_ALLOWED_ORIGINS"
 )
 
 const (
@@ -56,7 +56,6 @@ const (
 	defaultChannelSendTimeout           = 100 * time.Millisecond
 	defaultMaximumBodySizeInBytes       = 1048576
 	defaultApplicationEnvironment       = "production"
-	defaultRoutingConfigurationFilePath = "configs/routing.json"
 	service1Destination                 = "service1"
 	defaultPublishTimeout               = 5 * time.Second
 	defaultRabbitMQUseTLS               = false
@@ -67,7 +66,6 @@ const (
 	defaultWriteFlushInterval               = time.Second
 	defaultDatabaseDirectoryPath            = "./data"
 	defaultDatabaseBusyTimeout              = 5 * time.Second
-	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
 	DefaultSpoolFilePath                    = "ingestion-spool.log"
@@ -106,7 +104,7 @@ type ApplicationConfiguration struct {
 	ChannelSendTimeout               time.Duration
 	MaximumBodySizeInBytes           int
 	ApplicationEnvironment           string
-	RoutingConfigurationFilePath     string
+	RoutingRules                     map[string]string
 	DefaultDestination               string
 	TrustedProxies                   []string
 	RabbitMQHost                     string
@@ -133,19 +131,13 @@ type ApplicationConfiguration struct {
 	ShutdownGracePeriod              time.Duration
 }
 
-// Builds the application configuration from the merged process environment and configuration file, returning an error naming the first invalid setting.
+// Builds the application configuration from .env, returning an error naming the first invalid setting.
 func NewApplicationConfiguration() (ApplicationConfiguration, error) {
-	environmentVariables := mapFromOSEnviron(os.Environ())
-	configurationFilePath := environmentVariables[environmentNameConfigurationFilePath]
-	if configurationFilePath == "" {
-		configurationFilePath = defaultConfigurationFilePath
+	environmentVariables, fileError := godotenv.Read(".env")
+	if fileError != nil {
+		return ApplicationConfiguration{}, fmt.Errorf("loading .env: %w", fileError)
 	}
-	configurationFileSettings, configurationFileError := readOptionalConfigurationFile(configurationFilePath)
-	if configurationFileError != nil {
-		return ApplicationConfiguration{}, configurationFileError
-	}
-	mergedSettings := mergedEnvironmentWithFileSettings(environmentVariables, configurationFileSettings)
-	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(mergedSettings)
+	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 	if configurationError != nil {
 		return ApplicationConfiguration{}, configurationError
 	}
@@ -204,11 +196,11 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.ApplicationEnvironment = applicationEnvironment
 
-	routingConfigurationFilePath, routingConfigurationFilePathError := parseStringSetting(environmentVariables, environmentNameRoutingConfigurationFilePath, defaultRoutingConfigurationFilePath)
-	if routingConfigurationFilePathError != nil {
-		return ApplicationConfiguration{}, routingConfigurationFilePathError
+	routingRules, routingRulesError := parseRoutingRulesSetting(environmentVariables, environmentNameRoutingRules)
+	if routingRulesError != nil {
+		return ApplicationConfiguration{}, routingRulesError
 	}
-	applicationConfiguration.RoutingConfigurationFilePath = routingConfigurationFilePath
+	applicationConfiguration.RoutingRules = routingRules
 
 	defaultDestination, defaultDestinationError := parseStringSetting(environmentVariables, environmentNameDefaultDestination, service1Destination)
 	if defaultDestinationError != nil {
@@ -519,4 +511,33 @@ func parseBooleanSetting(environmentVariables map[string]string, settingName str
 	}
 
 	return parsedSettingValue, nil
+}
+
+// Parses comma-separated key=value routing rules.
+func parseRoutingRulesSetting(environmentVariables map[string]string, settingName string) (map[string]string, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return map[string]string{}, nil
+	}
+	rules := make(map[string]string)
+	pairs := strings.Split(rawSettingValue, ",")
+	for _, pair := range pairs {
+		trimmed := strings.TrimSpace(pair)
+		if trimmed == "" {
+			continue
+		}
+		
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("environment variable %s contains invalid rule %q, expected key=value", settingName, trimmed)
+		}
+		
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if key == "" || value == "" {
+			return nil, fmt.Errorf("environment variable %s contains empty key or value in rule %q", settingName, trimmed)
+		}
+		rules[key] = value
+	}
+	return rules, nil
 }

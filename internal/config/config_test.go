@@ -57,8 +57,8 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("ApplicationEnvironment = %q, want %q", applicationConfiguration.ApplicationEnvironment, defaultApplicationEnvironment)
 	}
 
-	if applicationConfiguration.RoutingConfigurationFilePath != defaultRoutingConfigurationFilePath {
-		t.Errorf("RoutingConfigurationFilePath = %q, want %q", applicationConfiguration.RoutingConfigurationFilePath, defaultRoutingConfigurationFilePath)
+	if len(applicationConfiguration.RoutingRules) != 0 {
+		t.Errorf("RoutingRules = %v, want empty", applicationConfiguration.RoutingRules)
 	}
 
 	if applicationConfiguration.DefaultDestination != service1Destination {
@@ -153,7 +153,7 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables[environmentNameChannelSendTimeout] = "250ms"
 	environmentVariables[environmentNameMaximumBodySizeInBytes] = "2048"
 	environmentVariables[environmentNameApplicationEnvironment] = "staging"
-	environmentVariables[environmentNameRoutingConfigurationFilePath] = "rules.json"
+	environmentVariables[environmentNameRoutingRules] = "claims=service2,billing=service3"
 	environmentVariables[environmentNameDefaultDestination] = "service2"
 	environmentVariables[environmentNameRabbitMQHost] = "broker.internal"
 	environmentVariables[environmentNameRabbitMQPort] = "5673"
@@ -209,8 +209,8 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 		t.Errorf("ApplicationEnvironment = %q, want %q", applicationConfiguration.ApplicationEnvironment, "staging")
 	}
 
-	if applicationConfiguration.RoutingConfigurationFilePath != "rules.json" {
-		t.Errorf("RoutingConfigurationFilePath = %q, want %q", applicationConfiguration.RoutingConfigurationFilePath, "rules.json")
+	if applicationConfiguration.RoutingRules["claims"] != "service2" || applicationConfiguration.RoutingRules["billing"] != "service3" {
+		t.Errorf("RoutingRules = %v, want claims=service2 billing=service3", applicationConfiguration.RoutingRules)
 	}
 
 	if applicationConfiguration.DefaultDestination != "service2" {
