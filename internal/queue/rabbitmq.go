@@ -347,7 +347,7 @@ func (publisher *Publisher) recordPublishedMessages(messageCount int) {
 	}
 }
 
-// Publishes a batch of enriched logs on one checked-out session and waits for a single cumulative confirm covering the whole batch.
+// Publishes a batch on one checked-out session and verifies every confirmation.
 func (publisher *Publisher) publishToBroker(enrichedLogs []model.EnrichedLog) error {
 	session, sessionError := publisher.checkoutSession()
 	if sessionError != nil {
@@ -358,7 +358,7 @@ func (publisher *Publisher) publishToBroker(enrichedLogs []model.EnrichedLog) er
 	publishContext, publishContextCancel := context.WithTimeout(context.Background(), publisher.applicationConfiguration.PublishTimeout)
 	defer publishContextCancel()
 
-	var lastConfirmation *amqp.DeferredConfirmation
+	confirmations := make([]*amqp.DeferredConfirmation, 0, len(enrichedLogs))
 	for _, enrichedLog := range enrichedLogs {
 		body, marshalError := json.Marshal(enrichedLog)
 		if marshalError != nil {
@@ -380,11 +380,14 @@ func (publisher *Publisher) publishToBroker(enrichedLogs []model.EnrichedLog) er
 		if publishError != nil {
 			return publishError
 		}
-		lastConfirmation = confirmation
+		if confirmation == nil {
+			return errPublishNotConfirmed
+		}
+		confirmations = append(confirmations, confirmation)
 	}
 
-	if lastConfirmation != nil {
-		publishConfirmed, publishConfirmationError := lastConfirmation.WaitContext(publishContext)
+	for _, confirmation := range confirmations {
+		publishConfirmed, publishConfirmationError := confirmation.WaitContext(publishContext)
 		if publishConfirmationError != nil || !publishConfirmed {
 			return errPublishNotConfirmed
 		}

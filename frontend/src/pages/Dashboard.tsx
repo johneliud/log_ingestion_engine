@@ -60,12 +60,15 @@ export default function Dashboard() {
       },
     ],
   }
+  const topServices = Object.entries(snapshot.logs_by_service ?? {})
+    .sort(([, left], [, right]) => right - left)
+    .slice(0, 5)
   const topServicesData = {
-    labels: Object.keys(snapshot.logs_by_service ?? {}).slice(0, 5),
+    labels: topServices.map(([service]) => service),
     datasets: [
       {
         label: 'Logs received',
-        data: Object.values(snapshot.logs_by_service ?? {}).slice(0, 5),
+        data: topServices.map(([, count]) => count),
         backgroundColor: '#0f172a',
       },
     ],

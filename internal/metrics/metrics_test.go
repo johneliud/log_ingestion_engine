@@ -392,3 +392,21 @@ func TestMetrics_SubscribeAndUnsubscribeAreSafeWhileSnapshotsBroadcast(t *testin
 		t.Errorf("TotalLogsReceived = %d, want %d", snapshot.TotalLogsReceived, iterationCount)
 	}
 }
+
+func TestMetricsBroadcastReplacesBufferedSnapshot(t *testing.T) {
+	registry := newMetricsRegistryWithoutBroadcastLoop(time.Now)
+	channel := registry.Subscribe()
+	defer registry.Unsubscribe(channel)
+	registry.RecordLogsReceived([]model.LogEntry{{Service: "one", Level: model.LogLevelInfo}})
+	registry.broadcastIfDirty()
+	registry.RecordLogsReceived([]model.LogEntry{{Service: "two", Level: model.LogLevelInfo}})
+	registry.broadcastIfDirty()
+	select {
+	case snapshot := <-channel:
+		if snapshot.TotalLogsReceived != 2 {
+			t.Fatalf("buffered total = %d, want latest total 2", snapshot.TotalLogsReceived)
+		}
+	default:
+		t.Fatal("missing snapshot")
+	}
+}

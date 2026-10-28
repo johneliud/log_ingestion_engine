@@ -41,14 +41,12 @@ type storedLogRow struct {
 func integrationTestConfiguration(t *testing.T) config.ApplicationConfiguration {
 	t.Helper()
 
-	repositoryConfigurationFilePath := filepath.Join(integrationTestRepositoryRoot, ".env")
-	if os.Getenv("CONFIG_FILE_PATH") == "" {
-		if _, statError := os.Stat(repositoryConfigurationFilePath); statError == nil {
-			t.Setenv("CONFIG_FILE_PATH", repositoryConfigurationFilePath)
-		}
-	}
-
-	brokerConfiguration, configurationError := config.NewApplicationConfiguration()
+	var brokerConfiguration config.ApplicationConfiguration
+	var configurationError error
+	t.Run("load broker configuration from repository root", func(t *testing.T) {
+		t.Chdir(integrationTestRepositoryRoot)
+		brokerConfiguration, configurationError = config.NewApplicationConfiguration()
+	})
 	if configurationError != nil {
 		t.Skipf("skipping the integration test because the broker configuration is missing: %v", configurationError)
 	}
@@ -500,4 +498,97 @@ func TestIntegration_GracefulShutdownStoresEveryAcceptedLog(t *testing.T) {
 
 	newTestServerApplication(t, applicationConfiguration)
 	waitForStoredLogCount(t, databaseFilePath, "claims", acceptedLogCount)
+}
+
+func TestIntegration_LargeSpoolReplaysThroughFallbackWithoutBlockingStartup(t *testing.T) {
+	configuration := integrationTestConfigurationWithoutBroker(t)
+	configuration.RawLogsBufferSize = 2
+	configuration.ConsumerBatchSize = 2
+	configuration.PipelineWorkerCount = 1
+	configuration.WriteBatchSize = 1
+	configuration.SpoolFilePath = filepath.Join(t.TempDir(), "spool")
+	s, err := spool.NewSpool(configuration.SpoolFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := make([]model.RawLog, 30)
+	for index := range logs {
+		logs[index] = model.RawLog{LogEntry: model.LogEntry{Timestamp: "2026-10-28T12:00:00Z", Service: "claims", Level: model.LogLevelInfo, Message: "replayed"}, LogID: uuid.NewString(), BatchID: uuid.NewString(), ReceivedAt: time.Now()}
+	}
+	if err := s.Append(logs); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	type result struct {
+		application *serverApplication
+		err         error
+	}
+	var application *serverApplication
+	started := make(chan result, 1)
+	go func() { application, err := newServerApplication(configuration); started <- result{application, err} }()
+	select {
+	case applicationResult := <-started:
+		if applicationResult.err != nil {
+			t.Fatal(applicationResult.err)
+		}
+		application = applicationResult.application
+		t.Cleanup(func() {
+			if err := applicationResult.application.shutdownBackgroundWork(aTestShutdownContext(t)); err != nil {
+				t.Error(err)
+			}
+		})
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup blocked while replaying spool")
+	}
+	// A full fallback deliberately sends overflow to durable dead letters.
+	deadline := time.NewTimer(integrationTestWaitTimeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(integrationTestPollInterval)
+	defer poll.Stop()
+	for {
+		unacked, err := application.ingestionSpool.Unacked()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unacked) == 0 {
+			break
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			t.Fatalf("%d replayed logs never reached a durable sink", len(unacked))
+		}
+	}
+	database, err := sql.Open("sqlite", filepath.Join(configuration.DatabaseDirectoryPath, config.DatabaseFileService1Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query("SELECT log_id FROM logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	durableIDs := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		durableIDs[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(durableIDs) == 0 {
+		t.Fatal("storage workers never drained the fallback")
+	}
+	for _, entry := range readDeadLetterEntries(t, configuration.DeadLetterFilePath) {
+		durableIDs[entry.Log.LogID] = true
+	}
+	for _, log := range logs {
+		if !durableIDs[log.LogID] {
+			t.Errorf("replayed log %q missing from durable sinks", log.LogID)
+		}
+	}
 }

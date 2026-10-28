@@ -37,6 +37,7 @@ func newMetricsEventsHandler(metricsRegistry *metrics.Metrics, applicationConfig
 		responseWriter.Header().Set("Cache-Control", "no-cache")
 		responseWriter.Header().Set("Connection", "keep-alive")
 		responseWriter.Header().Set("X-Accel-Buffering", "no")
+		responseWriter.Header().Add("Vary", "Origin")
 		if origin != "" {
 			responseWriter.Header().Set("Access-Control-Allow-Origin", origin)
 		}
@@ -95,9 +96,6 @@ func refreshQueueBacklog(applicationContext context.Context, metricsRegistry *me
 
 // Reports whether origin is in the allowed list.
 func isOriginAllowed(origin string, allowedOrigins []string) bool {
-	if len(allowedOrigins) == 0 {
-		return true
-	}
 	return slices.Contains(allowedOrigins, origin)
 }
 

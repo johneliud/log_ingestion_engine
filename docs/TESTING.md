@@ -193,6 +193,14 @@ timeout 3 curl -N -s localhost:8080/metrics/events
 
 #### Test 7 — Rate limiting (rapid requests)
 
+Stop the running server, then start it with a lower request limit:
+
+```bash
+RATE_LIMIT=2 go run ./cmd/server
+```
+
+In another terminal, send requests rapidly. A request exceeding two requests per second from the same IP should return `429 Too Many Requests` (the limiter replenishes over time):
+
 ```bash
 for i in $(seq 1 5); do
   code=$(curl -s -o /dev/null -w "%{http_code}" -X POST localhost:8080/logs -H 'Content-Type: application/json' -d '[{"timestamp":"2026-10-28T10:00:00Z","service":"test","level":"INFO","message":"rate test"}]')

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -137,6 +138,13 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	deadLetterWriter := storage.NewDeadLetterWriter(applicationConfiguration)
 
+	consumerDeadLetterSink := func(entry model.DeadLetterEntry) error {
+		if err := deadLetterWriter.Submit(entry); err != nil {
+			return err
+		}
+		return ingestionSpool.Ack(entry.Log.LogID)
+	}
+
 	batchConsumer := pipeline.NewBatchConsumer(pipeline.BatchConsumerDependencies{
 		RawLogsQueue:       rawLogsQueue,
 		ConsumerBatchSize:  applicationConfiguration.ConsumerBatchSize,
@@ -144,7 +152,7 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		Enricher:           logEnricher,
 		Router:             serviceRouter,
 		QueuePublisher:     publisher,
-		DeadLetterSink:     deadLetterWriter.Submit,
+		DeadLetterSink:     consumerDeadLetterSink,
 		DefaultDestination: model.Destination(applicationConfiguration.DefaultDestination),
 	})
 
@@ -205,6 +213,8 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	flushTrigger, flushTriggerCompletion := startFlushTrigger(storageContext, applicationConfiguration.WriteFlushInterval)
 
+	deadLetterCompletion := deadLetterWriter.Run()
+
 	// Start the pipeline before replaying the spool so replayed logs drain as they are pushed; replaying into a queue with no consumers would fill it and drop every log beyond its capacity.
 	pipelineCompletion := batchConsumer.Start(pipelineContext)
 
@@ -212,7 +222,6 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 	if replayError != nil {
 		slog.Error("replaying spooled logs failed", "error", replayError)
 	}
-	replaySpooledLogs(rawLogsQueue, unackedSpooledLogs, applicationConfiguration.ConsumerBatchSize, pipelineContext)
 
 	backgroundCompletions := []backgroundWork{
 		{name: "the publisher reconnect loop", completion: publisher.RunReconnectLoop(storageContext)},
@@ -222,7 +231,12 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		{name: "the flush trigger", completion: flushTriggerCompletion},
 		{name: "the rate limiter idle cleanup", completion: rateLimiter.StartIdleCleanup(storageContext, applicationConfiguration.RateLimitCleanupInterval)},
 	}
-	deadLetterCompletion := deadLetterWriter.Run()
+	replayCompletion := make(chan struct{})
+	go func() {
+		defer close(replayCompletion)
+		replaySpooledLogs(rawLogsQueue, unackedSpooledLogs, applicationConfiguration.ConsumerBatchSize, pipelineContext)
+	}()
+	backgroundCompletions = append(backgroundCompletions, backgroundWork{name: "the spool replay", completion: replayCompletion})
 
 	return &serverApplication{
 		requestRouter:         trackedRequestRouter,
@@ -297,16 +311,27 @@ func logConfigurationSummary(applicationConfiguration config.ApplicationConfigur
 	)
 }
 
+// Owns the HTTP server and the cancellation shared by its request contexts.
+type applicationHTTPServer struct {
+	*http.Server
+	cancelRequests context.CancelFunc
+}
+
 // Builds the HTTP server that serves the wired request router.
-func newHTTPServer(applicationConfiguration config.ApplicationConfiguration, requestRouter http.Handler) *http.Server {
-	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", applicationConfiguration.HTTPPort),
-		Handler: requestRouter,
+func newHTTPServer(applicationConfiguration config.ApplicationConfiguration, requestRouter http.Handler) *applicationHTTPServer {
+	requestContext, cancelRequests := context.WithCancel(context.Background())
+	return &applicationHTTPServer{
+		Server: &http.Server{
+			Addr:        fmt.Sprintf(":%d", applicationConfiguration.HTTPPort),
+			Handler:     requestRouter,
+			BaseContext: func(net.Listener) context.Context { return requestContext },
+		},
+		cancelRequests: cancelRequests,
 	}
 }
 
 // Starts the HTTP server in the background and returns the channel that reports the listen error.
-func startHTTPServer(httpServer *http.Server) <-chan error {
+func startHTTPServer(httpServer *applicationHTTPServer) <-chan error {
 	serverListenErrorChannel := make(chan error, 1)
 	go func() {
 		serverListenErrorChannel <- httpServer.ListenAndServe()
@@ -328,7 +353,8 @@ func waitForTheServerToStop(applicationContext context.Context, serverListenErro
 }
 
 // Stops accepting requests, closes the connections that outlast the deadline and reports the shutdown failure.
-func shutdownHTTPServer(httpServer *http.Server, shutdownContext context.Context) error {
+func shutdownHTTPServer(httpServer *applicationHTTPServer, shutdownContext context.Context) error {
+	httpServer.cancelRequests()
 	shutdownError := httpServer.Shutdown(shutdownContext)
 	if shutdownError == nil {
 		return nil
@@ -424,7 +450,7 @@ func (application *serverApplication) deadLetterRemainingRawLogs() error {
 			slog.Error("writing the dead letter entry failed", "error", submitError, "batch_id", rawLog.BatchID)
 			deadLetterError = errors.Join(deadLetterError, submitError)
 		} else if application.ingestionSpool != nil {
-			application.ingestionSpool.Ack(rawLog.LogID)
+			deadLetterError = errors.Join(deadLetterError, application.ingestionSpool.Ack(rawLog.LogID))
 		}
 	}
 	return deadLetterError

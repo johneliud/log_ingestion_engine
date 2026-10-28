@@ -2,271 +2,372 @@ package spool
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 )
 
-var (
-	errSpoolClosed = errors.New("spool is closed")
-)
+var errSpoolClosed = errors.New("spool is closed")
 
-// Every accepted log is appended and fsynced here before the handler reports acceptance to the client, so a crash can never silently lose an accepted log.
-type Spool struct {
-	path     string
-	ackPath  string
-	file     *os.File
-	ackFile  *os.File
-	acked    map[string]bool
-	spooled  int
-	ackedCnt int
-	mu       sync.Mutex
+// File operations used by the spool and its recovery journal.
+type spoolFile interface {
+	io.Reader
+	io.ReaderAt
+	io.Writer
+	io.Seeker
+	Stat() (os.FileInfo, error)
+	Sync() error
+	Truncate(int64) error
+	Close() error
 }
 
-// Returns a spool that appends accepted logs to path and records handled log identifiers in path plus ".acked".
+// Every accepted log is appended and fsynced before the handler reports acceptance.
+type Spool struct {
+	path    string
+	ackPath string
+	file    spoolFile
+	ackFile spoolFile
+	acked   map[string]bool
+	spooled map[string]struct{}
+	mu      sync.Mutex
+}
+
+// Returns a spool with durable acknowledgements in path plus ".acked".
 func NewSpool(path string) (*Spool, error) {
 	if path == "" {
 		return nil, errors.New("spool path must not be empty")
 	}
-
-	if dirError := os.MkdirAll(filepath.Dir(path), 0o755); dirError != nil {
-		return nil, fmt.Errorf("creating spool directory %q: %w", filepath.Dir(path), dirError)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("creating spool directory: %w", err)
 	}
-
-	file, openError := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
-	if openError != nil {
-		return nil, fmt.Errorf("opening spool file %q: %w", path, openError)
+	s := &Spool{path: path, ackPath: path + ".acked", acked: make(map[string]bool), spooled: make(map[string]struct{})}
+	var err error
+	s.file, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
 	}
-
-	ackPath := path + ".acked"
-	ackFile, ackOpenError := os.OpenFile(ackPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
-	if ackOpenError != nil {
-		file.Close()
-		return nil, fmt.Errorf("opening spool ack file %q: %w", ackPath, ackOpenError)
+	s.ackFile, err = os.OpenFile(s.ackPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		s.Close()
+		return nil, err
 	}
-
-	spool := &Spool{
-		path:    path,
-		ackPath: ackPath,
-		file:    file,
-		ackFile: ackFile,
-		acked:   make(map[string]bool),
+	for _, target := range []struct {
+		file spoolFile
+		path string
+	}{{s.file, s.path}, {s.ackFile, s.ackPath}} {
+		if err = recoverAppend(target.file, target.path); err == nil {
+			err = truncatePartialLine(target.file)
+		}
+		if err != nil {
+			s.Close()
+			return nil, fmt.Errorf("recovering spool %q: %w", target.path, err)
+		}
 	}
-
-	if loadError := spool.loadAcks(); loadError != nil {
-		file.Close()
-		ackFile.Close()
-		return nil, fmt.Errorf("loading spool acknowledgements: %w", loadError)
+	if err = syncDirectory(path); err == nil {
+		err = s.loadAcks()
 	}
-
-	if countError := spool.countSpooled(); countError != nil {
-		file.Close()
-		ackFile.Close()
-		return nil, fmt.Errorf("counting spooled logs: %w", countError)
+	if err == nil {
+		var logs []model.RawLog
+		logs, err = s.Unacked()
+		for _, log := range logs {
+			s.spooled[log.LogID] = struct{}{}
+		}
 	}
-
-	return spool, nil
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
-// Writes every log to the spool and fsyncs before returning.
+// Writes the batch atomically with an undo journal, including across interrupted recovery.
 func (spool *Spool) Append(logs []model.RawLog) error {
 	if len(logs) == 0 {
 		return nil
 	}
-
+	var payload bytes.Buffer
+	for _, log := range logs {
+		if err := json.NewEncoder(&payload).Encode(log); err != nil {
+			return fmt.Errorf("marshalling spooled log %q: %w", log.LogID, err)
+		}
+	}
 	spool.mu.Lock()
 	defer spool.mu.Unlock()
-
 	if spool.file == nil {
 		return errSpoolClosed
 	}
-
-	writer := bufio.NewWriterSize(spool.file, 64*1024)
+	if err := appendDurably(spool.file, spool.path, payload.Bytes()); err != nil {
+		return fmt.Errorf("appending spool batch: %w", err)
+	}
 	for _, log := range logs {
-		serialized, marshalError := json.Marshal(log)
-		if marshalError != nil {
-			return fmt.Errorf("marshalling spooled log %q: %w", log.LogID, marshalError)
+		if !spool.acked[log.LogID] {
+			spool.spooled[log.LogID] = struct{}{}
 		}
-
-		serialized = append(serialized, '\n')
-		if _, writeError := writer.Write(serialized); writeError != nil {
-			return fmt.Errorf("writing spooled log %q: %w", log.LogID, writeError)
-		}
-		spool.spooled++
-	}
-	if flushError := writer.Flush(); flushError != nil {
-		return fmt.Errorf("flushing spool: %w", flushError)
-	}
-	if syncError := spool.file.Sync(); syncError != nil {
-		return fmt.Errorf("syncing spool: %w", syncError)
 	}
 	return nil
 }
 
-// Marks a log identifier as durably handled so startup replay skips it.
-func (spool *Spool) Ack(logID string) {
-	spool.mu.Lock()
-	defer spool.mu.Unlock()
-
-	if spool.ackFile == nil {
-		return
-	}
-	if spool.acked[logID] {
-		return
-	}
-
-	if _, writeError := spool.ackFile.WriteString(logID + "\n"); writeError != nil {
-		return
-	}
-	if syncError := spool.ackFile.Sync(); syncError != nil {
-		return
-	}
-	spool.acked[logID] = true
-	spool.ackedCnt++
+// Marks one log as durably handled.
+func (spool *Spool) Ack(logID string) error {
+	return spool.AckAll([]string{logID})
 }
 
-// Returns every spooled log that has not been acknowledged yet.
+// Acknowledges a batch with one acknowledgement write and sync. State changes only after success.
+func (spool *Spool) AckAll(logIDs []string) error {
+	spool.mu.Lock()
+	defer spool.mu.Unlock()
+	if spool.ackFile == nil {
+		return errSpoolClosed
+	}
+	var payload strings.Builder
+	ids := make(map[string]struct{}, len(logIDs))
+	for _, id := range logIDs {
+		if _, present := spool.spooled[id]; !present {
+			continue
+		}
+		if _, duplicate := ids[id]; duplicate {
+			continue
+		}
+		if strings.ContainsAny(id, "\r\n") || id == "" {
+			return errors.New("invalid spool acknowledgement ID")
+		}
+		ids[id] = struct{}{}
+		payload.WriteString(id + "\n")
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := appendDurably(spool.ackFile, spool.ackPath, []byte(payload.String())); err != nil {
+		return fmt.Errorf("acknowledging spool batch: %w", err)
+	}
+	for id := range ids {
+		spool.acked[id] = true
+		delete(spool.spooled, id)
+	}
+	return nil
+}
+
+// Returns every unacknowledged log, skipping corrupt lines independently.
 func (spool *Spool) Unacked() ([]model.RawLog, error) {
 	spool.mu.Lock()
 	defer spool.mu.Unlock()
-
 	if spool.file == nil {
 		return nil, errSpoolClosed
 	}
-
-	if _, seekError := spool.file.Seek(0, 0); seekError != nil {
-		return nil, fmt.Errorf("seeking spool file: %w", seekError)
+	if err := recoverAppend(spool.file, spool.path); err != nil {
+		return nil, err
 	}
-
-	var unacked []model.RawLog
-	scanner := bufio.NewScanner(spool.file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
+	if _, err := spool.file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	var logs []model.RawLog
+	reader := bufio.NewReader(spool.file)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if errors.Is(err, io.EOF) {
+			break // An incomplete record is never replayable.
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-
-		var rawLog model.RawLog
-		if unmarshalError := json.Unmarshal(line, &rawLog); unmarshalError != nil {
-			return nil, fmt.Errorf("parsing spooled log: %w", unmarshalError)
+		var log model.RawLog
+		if err := json.Unmarshal(line, &log); err != nil {
+			slog.Warn("skipping malformed spool line", "error", err)
+			continue
 		}
-
-		if !spool.acked[rawLog.LogID] {
-			unacked = append(unacked, rawLog)
+		if !spool.acked[log.LogID] {
+			logs = append(logs, log)
 		}
 	}
-	if scanError := scanner.Err(); scanError != nil {
-		return nil, fmt.Errorf("reading spool file: %w", scanError)
-	}
-	return unacked, nil
+	return logs, nil
 }
 
-// Removes the spool and ack files when every spooled log has been acknowledged, so the files do not grow without bound.
+// Truncates only when every known spooled ID has been acknowledged.
 func (spool *Spool) Compact() {
 	spool.mu.Lock()
 	defer spool.mu.Unlock()
-
-	if spool.spooled == 0 || spool.spooled != spool.ackedCnt {
+	if spool.file == nil || spool.ackFile == nil || len(spool.spooled) != 0 {
 		return
 	}
-
-	if _, seekError := spool.file.Seek(0, 0); seekError != nil {
+	if recoverAppend(spool.file, spool.path) != nil || recoverAppend(spool.ackFile, spool.ackPath) != nil {
 		return
 	}
-
-	if truncError := spool.file.Truncate(0); truncError != nil {
+	// Persist removal of the logs before removing their acknowledgements.
+	if err := spool.file.Truncate(0); err != nil {
 		return
 	}
-
-	if _, seekError := spool.ackFile.Seek(0, 0); seekError != nil {
+	if err := spool.file.Sync(); err != nil {
 		return
 	}
-
-	if truncError := spool.ackFile.Truncate(0); truncError != nil {
+	if err := spool.ackFile.Truncate(0); err != nil {
 		return
 	}
-
+	if err := spool.ackFile.Sync(); err != nil {
+		return
+	}
 	spool.acked = make(map[string]bool)
-	spool.spooled = 0
-	spool.ackedCnt = 0
 }
 
-// Closes the spool files.
 func (spool *Spool) Close() error {
 	spool.mu.Lock()
 	defer spool.mu.Unlock()
-
-	var closeErrors []error
+	var errs []error
 	if spool.file != nil {
-		if closeError := spool.file.Close(); closeError != nil {
-			closeErrors = append(closeErrors, closeError)
-		}
+		errs = append(errs, spool.file.Close())
 		spool.file = nil
 	}
-
 	if spool.ackFile != nil {
-		if closeError := spool.ackFile.Close(); closeError != nil {
-			closeErrors = append(closeErrors, closeError)
-		}
+		errs = append(errs, spool.ackFile.Close())
 		spool.ackFile = nil
 	}
+	return errors.Join(errs...)
+}
 
-	if len(closeErrors) > 0 {
-		return closeErrors[0]
+func (spool *Spool) loadAcks() error {
+	if _, err := spool.ackFile.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(spool.ackFile)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if id := scanner.Text(); id != "" {
+			spool.acked[id] = true
+		}
+	}
+	return scanner.Err()
+}
+
+// Discards a torn trailing line so the next append cannot merge with it.
+func truncatePartialLine(file spoolFile) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	end := info.Size()
+	buffer := make([]byte, 64*1024)
+	for end > 0 {
+		start := max(int64(0), end-int64(len(buffer)))
+		chunk := buffer[:end-start]
+		if _, err := file.ReadAt(chunk, start); err != nil {
+			return err
+		}
+		if index := bytes.LastIndexByte(chunk, '\n'); index >= 0 {
+			end = start + int64(index) + 1
+			break
+		}
+		end = start
+	}
+	if end == info.Size() {
+		return nil
+	}
+	if err := file.Truncate(end); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+// The journal is persisted before modifying the target and retained until rollback is synced.
+func appendDurably(file spoolFile, path string, payload []byte) error {
+	if err := recoverAppend(file, path); err != nil {
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	offset := info.Size()
+	if err := writeJournal(path, offset); err != nil {
+		return err
+	}
+	n, err := file.Write(payload)
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	if err == nil {
+		err = os.Remove(path + ".pending")
+		if err == nil {
+			err = syncDirectory(path)
+			if err != nil {
+				// Restore the undo record if persisting the commit failed.
+				err = errors.Join(err, writeJournal(path, offset))
+			}
+		}
+	}
+	if err != nil {
+		return errors.Join(err, recoverAppend(file, path))
 	}
 	return nil
 }
 
-// Reads every acknowledged log identifier from the sidecar file.
-func (spool *Spool) loadAcks() error {
-	ackFile, openError := os.Open(spool.ackPath)
-	if openError != nil {
-		if errors.Is(openError, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("opening spool ack file %q: %w", spool.ackPath, openError)
+func writeJournal(path string, offset int64) error {
+	journal, err := os.OpenFile(path+".pending.tmp", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
 	}
-	defer ackFile.Close()
-
-	scanner := bufio.NewScanner(ackFile)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		logID := scanner.Text()
-		if logID != "" {
-			spool.acked[logID] = true
-			spool.ackedCnt++
-		}
+	_, writeErr := fmt.Fprintf(journal, "%d\n", offset)
+	syncErr := journal.Sync()
+	closeErr := journal.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return err
 	}
-	return scanner.Err()
+	if err := os.Rename(path+".pending.tmp", path+".pending"); err != nil {
+		return err
+	}
+	return syncDirectory(path)
 }
 
-// Counts the lines currently held by the spool file.
-func (spool *Spool) countSpooled() error {
-	info, statError := spool.file.Stat()
-	if statError != nil {
-		return fmt.Errorf("stating spool file: %w", statError)
-	}
-
-	spool.spooled = 0
-	if info.Size() == 0 {
+func recoverAppend(file spoolFile, path string) error {
+	payload, err := os.ReadFile(path + ".pending")
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		return err
+	}
+	offset, err := strconv.ParseInt(strings.TrimSpace(string(payload)), 10, 64)
+	if err != nil || offset < 0 {
+		return fmt.Errorf("invalid spool undo journal %q", path)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if offset > info.Size() {
+		return fmt.Errorf("spool undo offset exceeds file size for %q", path)
+	}
+	if err := file.Truncate(offset); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := os.Remove(path + ".pending"); err != nil {
+		return err
+	}
+	return syncDirectory(path)
+}
 
-	if _, seekError := spool.file.Seek(0, 0); seekError != nil {
-		return fmt.Errorf("seeking spool file: %w", seekError)
+func syncDirectory(path string) error {
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
 	}
-	scanner := bufio.NewScanner(spool.file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		if len(scanner.Bytes()) > 0 {
-			spool.spooled++
-		}
-	}
-	return scanner.Err()
+	defer directory.Close()
+	return directory.Sync()
 }

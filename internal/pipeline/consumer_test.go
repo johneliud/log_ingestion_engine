@@ -299,7 +299,8 @@ func TestBatchConsumer_LogsErrorsAndContinues(t *testing.T) {
 		if err := decoder.Decode(&entry); err != nil {
 			t.Fatal(err)
 		}
-		if entry["level"] != "ERROR" || entry["error"] == "" {
+		errorMessage, isString := entry["error"].(string)
+		if entry["level"] != "ERROR" || !isString || errorMessage == "" {
 			t.Fatalf("error log missing expected details: %v", entry)
 		}
 	}

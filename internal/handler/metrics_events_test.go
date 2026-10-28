@@ -159,3 +159,27 @@ func TestMetricsEventsHandler_FallsBackToTheLocalInFlightEstimateWithoutAManagem
 		t.Errorf("streamed backlog = %d, want the local in-flight estimate 3", lastSnapshot.QueueBacklog)
 	}
 }
+
+func TestMetricsEventsHandlerDeniesOriginWhenAllowListIsEmpty(t *testing.T) {
+	registry := metrics.NewMetrics(time.Minute, nil)
+	request := httptest.NewRequest(http.MethodGet, "/metrics/events", nil)
+	request.Header.Set("Origin", "https://example.com")
+	response := httptest.NewRecorder()
+	NewMetricsEventsHandler(registry, config.ApplicationConfiguration{}).ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", response.Code)
+	}
+}
+
+func TestMetricsEventsHandlerVariesByAllowedOrigin(t *testing.T) {
+	registry := metrics.NewMetrics(time.Minute, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/metrics/events", nil).WithContext(ctx)
+	request.Header.Set("Origin", "https://example.com")
+	response := httptest.NewRecorder()
+	NewMetricsEventsHandler(registry, config.ApplicationConfiguration{CorsAllowedOrigins: []string{"https://example.com"}}).ServeHTTP(response, request)
+	if response.Header().Get("Access-Control-Allow-Origin") != "https://example.com" || response.Header().Get("Vary") != "Origin" {
+		t.Fatalf("CORS headers = %v", response.Header())
+	}
+}

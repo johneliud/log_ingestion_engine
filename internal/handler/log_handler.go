@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"time"
@@ -25,7 +26,8 @@ type rawLogPusher interface {
 // spooler durably records accepted logs before the handler reports acceptance.
 type spooler interface {
 	Append([]model.RawLog) error
-	Ack(logID string)
+	Ack(logID string) error
+	AckAll(logIDs []string) error
 }
 
 // Counts the log entries accepted by the ingestion handler.
@@ -114,13 +116,17 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 			}
 
 			if pushError := handlerConfiguration.rawLogPusher.PushBatch(rawLogs); pushError != nil {
-				handlerConfiguration.voidSpooledBatch(rawLogs)
-				if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
-					WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
+				if voidError := handlerConfiguration.voidSpooledBatch(rawLogs); voidError != nil {
+					// The durable spool still owns this batch; report acceptance for replay.
+					slog.Error("voiding spooled batch failed; retaining batch for replay", "error", voidError, "batch_id", batchID)
+				} else {
+					if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
+						WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
+						return
+					}
+					WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
 					return
 				}
-				WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
-				return
 			}
 			handlerConfiguration.recordLogsReceived(validEntries)
 			writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
@@ -159,13 +165,15 @@ func (configuration *logIngestionHandlerConfiguration) recordLogsReceived(validE
 }
 
 // Marks a spooled batch as handled after the queue refused it, so a batch the client was told was rejected is never replayed into the pipeline at the next startup.
-func (configuration *logIngestionHandlerConfiguration) voidSpooledBatch(rawLogs []model.RawLog) {
+func (configuration *logIngestionHandlerConfiguration) voidSpooledBatch(rawLogs []model.RawLog) error {
 	if configuration.spooler == nil {
-		return
+		return nil
 	}
-	for _, rawLog := range rawLogs {
-		configuration.spooler.Ack(rawLog.LogID)
+	logIDs := make([]string, len(rawLogs))
+	for index, rawLog := range rawLogs {
+		logIDs[index] = rawLog.LogID
 	}
+	return configuration.spooler.AckAll(logIDs)
 }
 
 // LogIngestionHandlerOption configures the log ingestion handler.

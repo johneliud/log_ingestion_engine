@@ -6,7 +6,7 @@ A Go service that accepts logs over HTTP, validates and enriches them, routes th
 
 ## Architecture
 
-The source diagram lives in [`frontend/public/architecture.mmd`](frontend/public/architecture.mmd) and is rendered by the React frontend on the home page alongside a project summary, the design decisions and nav links to the dashboard and metrics. Every component receives a single `ApplicationConfiguration` loaded from the configuration file and process environment.
+The source diagram lives in [`frontend/public/architecture.mmd`](frontend/public/architecture.mmd) and is rendered by the React frontend on the home page alongside a project summary, the design decisions and nav links to the dashboard and metrics. Every component receives a single `ApplicationConfiguration` loaded from `.env` and the process environment.
 
 ```mermaid
 flowchart TB
@@ -19,7 +19,7 @@ flowchart TB
         validate["Validate batch<br/>body size + per-entry errors"]
     end
 
-    rawQueue[("raw_logs<br/>bounded channel")]
+    rawQueue[("raw_logs<br/>condition-variable queue")]
 
     subgraph processing["Pipeline worker pool"]
         direction TB
@@ -61,14 +61,14 @@ flowchart TB
     replay -.->|"replay"| sqlite
 ```
 
-Clients pass through the rate limiter to `POST /logs`, where the batch is validated and pushed into the bounded `raw_logs` channel. Pipeline workers enrich and route each log before the publisher sends it to RabbitMQ. If publishing fails, the log enters the bounded fallback instead.
+Clients pass through the rate limiter to `POST /logs`, where the batch is validated and pushed into the bounded, condition-variable `RawLogsQueue` (`raw_logs`). Pipeline workers enrich and route each log before the publisher sends it to RabbitMQ. If publishing fails, the log enters the bounded fallback instead.
 
 A consumer supervisor keeps one broker connection for the per-destination consumers and replaces it with backoff when a subscription ends. Consumers write through the retrying batch writer into one SQLite database per destination, and logs whose retries are exhausted go to the shared dead-letter file for later replay.
 
 ## Concurrency model
 
-- HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded `raw_logs` channel (`pipeline.RawLogsQueue` push with a per-log send budget, the whole request answers `503` when a push times out).
-- `PIPELINE_WORKER_COUNT` workers take batches from that one channel, enrich, route and publish each log, waiting for the broker confirm per log. They share one publisher whose bounded in-memory fallback and one fallback consumer drain it while disconnected.
+- HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded, condition-variable `pipeline.RawLogsQueue` (`raw_logs`, with a batch reservation timeout). A queue timeout returns `503` after the spooled batch is durably voided; if voiding fails, the durable batch is accepted for replay.
+- `PIPELINE_WORKER_COUNT` workers take batches from that one queue, enrich, route and publish each log, waiting for the broker confirm per log. They share one publisher whose bounded in-memory fallback and one fallback consumer drain it while disconnected.
 - One consumer per destination queue holds its own AMQP connection; the supervisor owns one shared connection and replaces failed subscriptions with backoff.
 - The batch writer is a single sink goroutine with per-destination buffers and one retry loop. The dead-letter writer is a single goroutine owning all file I/O. Metrics counters are mutex-guarded atomics-snapshot style.
 - Shutdown walks these pieces in reverse order under one grace-period deadline (see `Graceful shutdown`).

@@ -1,6 +1,10 @@
 package spool
 
 import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -123,5 +127,208 @@ func TestSpoolCompactRemovesFullyAckedLogs(t *testing.T) {
 	}
 	if len(unacked) != 0 {
 		t.Fatalf("expected no unacked logs after compact, got %d", len(unacked))
+	}
+}
+
+// Simulates disk failures after bytes have been written, rather than failing before the operation starts.
+type failingSpoolFile struct {
+	spoolFile
+	failWrite bool
+	failSync  bool
+}
+
+func (file *failingSpoolFile) Write(payload []byte) (int, error) {
+	if file.failWrite {
+		n, _ := file.spoolFile.Write(payload[:len(payload)/2])
+		return n, errors.New("injected partial write")
+	}
+	return file.spoolFile.Write(payload)
+}
+
+func (file *failingSpoolFile) Sync() error {
+	if file.failSync {
+		file.failSync = false
+		return errors.New("injected sync failure")
+	}
+	return file.spoolFile.Sync()
+}
+
+func TestSpoolFailedAppendCannotReplayAnyOfTheBatch(t *testing.T) {
+	for _, failure := range []string{"partial write", "sync"} {
+		t.Run(failure, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "spool")
+			s, err := NewSpool(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Append([]model.RawLog{testRawLog("accepted", "before")}); err != nil {
+				t.Fatal(err)
+			}
+			s.file = &failingSpoolFile{spoolFile: s.file, failWrite: failure == "partial write", failSync: failure == "sync"}
+			if err := s.Append([]model.RawLog{testRawLog("rejected-1", "failed"), testRawLog("rejected-2", "failed")}); err == nil {
+				t.Fatal("expected append failure")
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			s, err = NewSpool(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			logs, err := s.Unacked()
+			if err != nil || len(logs) != 1 || logs[0].LogID != "accepted" {
+				t.Fatalf("replay after failed append: %+v, %v", logs, err)
+			}
+		})
+	}
+}
+
+func TestSpoolRecoversInterruptedAppendAndInterruptedRollback(t *testing.T) {
+	for _, stage := range []string{"partial batch", "complete batch", "rollback truncated"} {
+		t.Run(stage, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "spool")
+			s, err := NewSpool(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Append([]model.RawLog{testRawLog("accepted", "before")}); err != nil {
+				t.Fatal(err)
+			}
+			info, err := s.file.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJournal(path, info.Size()); err != nil {
+				t.Fatal(err)
+			}
+			payload, _ := json.Marshal(testRawLog("uncommitted", "interrupted"))
+			if stage == "partial batch" {
+				payload = payload[:len(payload)/2]
+			} else {
+				payload = append(payload, '\n')
+			}
+			if _, err := s.file.Write(payload); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.file.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if stage == "rollback truncated" {
+				if err := s.file.Truncate(info.Size()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.Close() // Simulate a crash with the undo record still present.
+			s, err = NewSpool(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if err := s.Append([]model.RawLog{testRawLog("next", "after")}); err != nil {
+				t.Fatal(err)
+			}
+			logs, err := s.Unacked()
+			if err != nil || len(logs) != 2 || logs[0].LogID != "accepted" || logs[1].LogID != "next" {
+				t.Fatalf("recovered replay: %+v, %v", logs, err)
+			}
+		})
+	}
+}
+
+func TestSpoolAckAllFailurePreservesReplayAndState(t *testing.T) {
+	for _, failure := range []string{"partial write", "sync"} {
+		t.Run(failure, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "spool")
+			s, err := NewSpool(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Append([]model.RawLog{testRawLog("one", "batch"), testRawLog("two", "batch")}); err != nil {
+				t.Fatal(err)
+			}
+			s.ackFile = &failingSpoolFile{spoolFile: s.ackFile, failWrite: failure == "partial write", failSync: failure == "sync"}
+			if err := s.AckAll([]string{"one", "two"}); err == nil {
+				t.Fatal("expected ack error")
+			}
+			if len(s.spooled) != 2 || len(s.acked) != 0 {
+				t.Fatal("failed acknowledgement updated state")
+			}
+			s.Compact()
+			s.Close()
+			s, err = NewSpool(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			logs, err := s.Unacked()
+			if err != nil || len(logs) != 2 {
+				t.Fatalf("replay after failed ack: %+v, %v", logs, err)
+			}
+		})
+	}
+}
+
+func TestSpoolMalformedLinesAndPartialTailDoNotBlockReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spool")
+	valid, _ := json.Marshal(testRawLog("existing", "batch"))
+	payload := append([]byte("not json\n"), valid...)
+	payload = append(payload, []byte("\n{\"log_id\":\"partial")...)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewSpool(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Append([]model.RawLog{testRawLog("next", "batch")}); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := s.Unacked()
+	if err != nil || len(logs) != 2 || logs[1].LogID != "next" {
+		t.Fatalf("replay with corrupt lines: %+v, %v", logs, err)
+	}
+}
+
+func TestSpoolUnknownAndDuplicateAcksCannotCompactPendingLogs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spool")
+	s, err := NewSpool(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append([]model.RawLog{testRawLog("one", "batch"), testRawLog("two", "batch")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AckAll([]string{"one", "one", "unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	// Legacy sidecars can contain duplicate or unknown IDs too.
+	file, err := os.OpenFile(path+".acked", os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("one\nunknown\n"); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	s, err = NewSpool(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.Compact()
+	logs, err := s.Unacked()
+	if err != nil || len(logs) != 1 || logs[0].LogID != "two" {
+		t.Fatalf("compaction lost pending log: %+v, %v", logs, err)
+	}
+	if err := s.Ack("two"); err != nil {
+		t.Fatal(err)
+	}
+	s.Compact()
+	info, err := os.Stat(path)
+	if err != nil || info.Size() != 0 {
+		t.Fatalf("fully acknowledged spool not compacted: %v, %v", info, err)
 	}
 }

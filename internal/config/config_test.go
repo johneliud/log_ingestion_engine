@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -511,5 +512,48 @@ func TestNewApplicationConfigurationFromEnvironment_WrapsMissingRequiredSetting(
 
 	if !errors.Is(configurationError, errMissingRequiredSetting) {
 		t.Errorf("error %v should wrap errMissingRequiredSetting", configurationError)
+	}
+}
+
+func TestNewApplicationConfigurationLoadsOptionalFileAndEnvironment(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for name, value := range aValidMinimalEnvironment(t) {
+		t.Setenv(name, value)
+	}
+	t.Setenv("HTTP_PORT", "18081")
+	t.Setenv("APP_ENV", "")
+	if err := os.Unsetenv("APP_ENV"); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := NewApplicationConfiguration()
+	if err != nil || configuration.HTTPPort != 18081 {
+		t.Fatalf("environment without .env: %+v, %v", configuration, err)
+	}
+	if err := os.WriteFile(".env", []byte("HTTP_PORT=18082\nAPP_ENV=from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err = NewApplicationConfiguration()
+	if err != nil || configuration.HTTPPort != 18081 || configuration.ApplicationEnvironment != "from-file" {
+		t.Fatalf("file/environment precedence: %+v, %v", configuration, err)
+	}
+	t.Setenv("APP_ENV", "")
+	configuration, err = NewApplicationConfiguration()
+	if err != nil || configuration.ApplicationEnvironment != defaultApplicationEnvironment {
+		t.Fatalf("empty process value must override file: %+v, %v", configuration, err)
+	}
+	if err := os.WriteFile(".env", []byte("!invalid env syntax"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewApplicationConfiguration(); err == nil {
+		t.Fatal("malformed .env must fail")
+	}
+	if err := os.Remove(".env"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(".env", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewApplicationConfiguration(); err == nil {
+		t.Fatal("read errors other than missing must fail")
 	}
 }

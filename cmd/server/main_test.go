@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -390,5 +391,36 @@ func TestServerApplication_DeadLettersTheLogsThePipelineCouldNotProcess(t *testi
 	deadLetterEntryCount := countDeadLetterEntries(t, applicationConfiguration.DeadLetterFilePath)
 	if deadLetterEntryCount != len(undrainedLogs) {
 		t.Errorf("dead letter entry count = %d, want %d", deadLetterEntryCount, len(undrainedLogs))
+	}
+}
+
+func TestHTTPShutdownCancelsAndWaitsForMetricsStream(t *testing.T) {
+	configuration := testApplicationConfiguration(t)
+	registry := metrics.NewMetrics(time.Minute, nil)
+	var inFlight sync.WaitGroup
+	server := newHTTPServer(configuration, trackRunningRequests(buildRequestRouter(configuration, http.NotFoundHandler(), registry), &inFlight))
+	testServer := httptest.NewUnstartedServer(server.Handler)
+	testServer.Config = server.Server
+	testServer.Start()
+	defer testServer.Close()
+	response, err := testServer.Client().Get(testServer.URL + "/metrics/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if _, err := bufio.NewReader(response.Body).ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := shutdownHTTPServer(server, ctx); err != nil {
+		t.Fatalf("stream prevented graceful shutdown: %v", err)
+	}
+	completed := make(chan struct{})
+	go func() { inFlight.Wait(); close(completed) }()
+	select {
+	case <-completed:
+	case <-ctx.Done():
+		t.Fatal("stream remained tracked after shutdown")
 	}
 }

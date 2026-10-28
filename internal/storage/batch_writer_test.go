@@ -11,6 +11,7 @@ import (
 
 	"github.com/johneliud/log_ingestion_engine/internal/config"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
+	"github.com/johneliud/log_ingestion_engine/internal/spool"
 )
 
 // Builds a complete enriched log for storage tests.
@@ -535,5 +536,30 @@ func TestSQLiteLogStore_StoresEveryColumnForADestination(t *testing.T) {
 	}
 	if otherDestinationRowCount != 0 {
 		t.Errorf("other destination row count = %d, want 0", otherDestinationRowCount)
+	}
+}
+
+func TestBatchWriterPreservesSpoolWhenDeadLetterWriteFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spool")
+	ingestionSpool, err := spool.NewSpool(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ingestionSpool.Close()
+	log := anEnrichedLog()
+	log.LogID = "keep-for-replay"
+	if err := ingestionSpool.Append([]model.RawLog{{LogEntry: log.LogEntry, LogID: log.LogID}}); err != nil {
+		t.Fatal(err)
+	}
+	deadLetterWriter := NewDeadLetterWriter(config.ApplicationConfiguration{DeadLetterFilePath: t.TempDir(), DeadLetterMaximumFileSizeInBytes: 1 << 20})
+	completed := deadLetterWriter.Run()
+	defer func() { deadLetterWriter.Close(); waitForDeadLetterWriter(t, completed) }()
+	writer := NewBatchWriter(BatchWriterDependencies{WriteBatchSize: 1, StoreBatch: func(model.Destination, []model.EnrichedLog) error { return errors.New("store failed") }, DeadLetterSink: deadLetterWriter.Submit, Spool: ingestionSpool})
+	if err := writer.StoreBatch(model.DestinationService1, []model.EnrichedLog{log}); err == nil {
+		t.Fatal("failed durable dead-letter write must propagate")
+	}
+	logs, err := ingestionSpool.Unacked()
+	if err != nil || len(logs) != 1 || logs[0].LogID != log.LogID {
+		t.Fatalf("spooled logs after dead-letter failure: %+v, %v", logs, err)
 	}
 }

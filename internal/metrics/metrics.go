@@ -280,11 +280,19 @@ func (metrics *Metrics) broadcastIfDirty() {
 		select {
 		case ch <- snapshot:
 		default:
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- snapshot:
+			default:
+			}
 		}
 	}
 }
 
-// Ticks on an interval and on every change notification, sending the current snapshot to all subscribers.
+// Samples and broadcasts on the fixed ticker interval.
 func (metrics *Metrics) broadcastLoop() {
 	defer close(metrics.broadcastDone)
 	ticker := time.NewTicker(broadcastInterval)
@@ -292,9 +300,6 @@ func (metrics *Metrics) broadcastLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			metrics.sampleHistoryIfDue()
-			metrics.broadcastIfDirty()
-		case <-metrics.changeNotifier:
 			metrics.sampleHistoryIfDue()
 			metrics.broadcastIfDirty()
 		}

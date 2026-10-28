@@ -50,8 +50,7 @@ export function useMetricsEvents() {
     }
 
     eventSource.onerror = () => {
-      setStatus('error')
-      eventSource.close()
+      setStatus(eventSource.readyState === EventSource.CLOSED ? 'error' : 'connecting')
     }
 
     eventSource.onmessage = handleMessage

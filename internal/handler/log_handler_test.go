@@ -335,6 +335,7 @@ type recordingSpooler struct {
 	mutex           sync.Mutex
 	appendedLogIDs  []string
 	acknowledgedIDs []string
+	ackError        error
 }
 
 // Records the appended logs.
@@ -348,10 +349,18 @@ func (recordingSpoolerInstance *recordingSpooler) Append(rawLogs []model.RawLog)
 }
 
 // Records one acknowledged log identifier.
-func (recordingSpoolerInstance *recordingSpooler) Ack(logID string) {
+func (recordingSpoolerInstance *recordingSpooler) Ack(logID string) error {
+	return recordingSpoolerInstance.AckAll([]string{logID})
+}
+
+func (recordingSpoolerInstance *recordingSpooler) AckAll(logIDs []string) error {
+	if recordingSpoolerInstance.ackError != nil {
+		return recordingSpoolerInstance.ackError
+	}
 	recordingSpoolerInstance.mutex.Lock()
 	defer recordingSpoolerInstance.mutex.Unlock()
-	recordingSpoolerInstance.acknowledgedIDs = append(recordingSpoolerInstance.acknowledgedIDs, logID)
+	recordingSpoolerInstance.acknowledgedIDs = append(recordingSpoolerInstance.acknowledgedIDs, logIDs...)
+	return nil
 }
 
 // Returns the acknowledged log identifiers.
@@ -576,4 +585,30 @@ func errorMessageForFieldInRejected(fieldErrors []model.FieldError, fieldName st
 		}
 	}
 	return ""
+}
+
+type failingRawLogPusher struct{ err error }
+
+func (pusher failingRawLogPusher) PushBatch([]model.RawLog) error { return pusher.err }
+
+func TestLogHandlerAcceptsSpooledBatchWhenVoidingFails(t *testing.T) {
+	for _, queueError := range []error{pipeline.ErrBatchTooLarge, pipeline.ErrQueueOverloaded} {
+		t.Run(queueError.Error(), func(t *testing.T) {
+			spool := &recordingSpooler{ackError: fmt.Errorf("disk sync failed")}
+			request := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(`[{"timestamp":"2026-10-28T12:00:00Z","service":"claims","level":"INFO","message":"keep for replay"}]`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			NewLogIngestionHandler(testMaximumBodySizeInBytes, WithSpool(spool), WithRawLogPusher(failingRawLogPusher{queueError})).ServeHTTP(response, request)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202 because batch remains durable", response.Code)
+			}
+			var accepted model.AcceptedResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil || accepted.BatchID == "" {
+				t.Fatalf("accepted response = %+v, %v", accepted, err)
+			}
+			if len(spool.appendedLogIDs) != 1 || len(spool.acknowledgedIDs) != 0 {
+				t.Fatal("batch must remain spooled for replay")
+			}
+		})
+	}
 }

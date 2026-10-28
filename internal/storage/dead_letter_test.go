@@ -305,3 +305,20 @@ func TestReplayDeadLetters_DeliversLogsBackToThePipeline(t *testing.T) {
 		t.Errorf("delivered log metadata = %+v, want destination %q and retry count %d", replayedLogs[0], model.DestinationService1, firstEntry.Log.RetryCount)
 	}
 }
+
+func TestDeadLetterSubmitReportsDurableWriteFailures(t *testing.T) {
+	for _, target := range []string{"directory", "sync failure"} {
+		t.Run(target, func(t *testing.T) {
+			path := t.TempDir()
+			if target == "sync failure" {
+				path = "/dev/null"
+			}
+			writer := NewDeadLetterWriter(config.ApplicationConfiguration{DeadLetterFilePath: path, DeadLetterMaximumFileSizeInBytes: 1 << 20})
+			completed := writer.Run()
+			defer func() { writer.Close(); waitForDeadLetterWriter(t, completed) }()
+			if err := writer.Submit(aDeadLetterEntry("failed")); err == nil {
+				t.Fatal("Submit succeeded despite failed durable write")
+			}
+		})
+	}
+}

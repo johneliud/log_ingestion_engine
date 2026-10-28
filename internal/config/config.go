@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -131,11 +132,18 @@ type ApplicationConfiguration struct {
 	ShutdownGracePeriod              time.Duration
 }
 
-// Builds the application configuration from .env, returning an error naming the first invalid setting.
+// Builds the application configuration from optional .env values overridden by the process environment.
 func NewApplicationConfiguration() (ApplicationConfiguration, error) {
 	environmentVariables, fileError := godotenv.Read(".env")
-	if fileError != nil {
+	if fileError != nil && !errors.Is(fileError, os.ErrNotExist) {
 		return ApplicationConfiguration{}, fmt.Errorf("loading .env: %w", fileError)
+	}
+	if environmentVariables == nil {
+		environmentVariables = make(map[string]string)
+	}
+	for _, variable := range os.Environ() {
+		name, value, _ := strings.Cut(variable, "=")
+		environmentVariables[name] = value
 	}
 	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 	if configurationError != nil {

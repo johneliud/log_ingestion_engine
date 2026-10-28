@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Every runtime setting of the log ingestion engine. Each entry in the table below is defined as a constant in `internal/config/config.go` and documented with its default in `configs/.env.example`. All settings are read from a single `.env` file in the working directory via `github.com/joho/godotenv`; there is no optional configuration file fallback.
+Every runtime setting of the log ingestion engine. Each entry in the table below is defined as a constant in `internal/config/config.go` and documented with its default in `configs/.env.example`. Settings are read from the optional `.env` file in the working directory via `github.com/joho/godotenv` and from the process environment.
 
 ## Where settings come from
 
@@ -69,7 +69,7 @@ The process environment is loaded from `.env` via `godotenv.Read(".env")`. Value
 | `METRICS_THROUGHPUT_WINDOW_IN_SECONDS` | Window over which `GET /metrics.json` throughput is averaged | `60` |
 | `METRICS_BACKLOG_TIMEOUT_IN_SECONDS` | Time budget for one management-API call when refreshing `queue_backlog` | `2` |
 | `SHUTDOWN_GRACE_PERIOD_IN_SECONDS` | Single deadline shared by every graceful shutdown phase | `30` |
-| `CORS_ALLOWED_ORIGINS` | Comma-separated list of origins allowed to consume `GET /metrics/events`. Empty allows all origins | *(empty)* |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated list of origins allowed to consume `GET /metrics/events`. Empty denies cross-origin streams | *(empty)* |
 
 ## Fixed names (not overridable)
 

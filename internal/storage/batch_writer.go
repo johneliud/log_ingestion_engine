@@ -13,7 +13,8 @@ import (
 
 // spooler acknowledges that a spooled log has been durably handled.
 type spooler interface {
-	Ack(logID string)
+	Ack(logID string) error
+	AckAll(logIDs []string) error
 	Compact()
 }
 
@@ -204,8 +205,7 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 		storeError := batchWriter.storeBatch(destination, enrichedLogs)
 		if storeError == nil {
 			batchWriter.recordStoredMessages(len(enrichedLogs))
-			batchWriter.ackSpooled(enrichedLogs)
-			return nil
+			return batchWriter.ackSpooled(enrichedLogs)
 		}
 		batchWriter.recordWriteFailure()
 
@@ -221,8 +221,7 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 			if deadLetterError != nil {
 				return deadLetterError
 			}
-			batchWriter.ackSpooled(enrichedLogs)
-			return nil
+			return batchWriter.ackSpooled(enrichedLogs)
 		}
 
 		retryDelay := batchWriter.retryBackoffDelays[retryIndex]
@@ -237,8 +236,7 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 				if deadLetterError != nil {
 					return deadLetterError
 				}
-				batchWriter.ackSpooled(enrichedLogs)
-				return nil
+				return batchWriter.ackSpooled(enrichedLogs)
 			}
 			return waitError
 		}
@@ -295,14 +293,19 @@ func (batchWriter *BatchWriter) recordDeadLetteredLog() {
 }
 
 // ackSpooled marks every log in the batch as durably handled so startup replay skips them.
-func (batchWriter *BatchWriter) ackSpooled(enrichedLogs []model.EnrichedLog) {
+func (batchWriter *BatchWriter) ackSpooled(enrichedLogs []model.EnrichedLog) error {
 	if batchWriter.spooler == nil {
-		return
+		return nil
 	}
-	for _, enrichedLog := range enrichedLogs {
-		batchWriter.spooler.Ack(enrichedLog.LogID)
+	logIDs := make([]string, len(enrichedLogs))
+	for index, enrichedLog := range enrichedLogs {
+		logIDs[index] = enrichedLog.LogID
+	}
+	if err := batchWriter.spooler.AckAll(logIDs); err != nil {
+		return err
 	}
 	batchWriter.spooler.Compact()
+	return nil
 }
 
 // Waits for the retry delay unless the application context is cancelled first.
