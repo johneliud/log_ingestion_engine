@@ -25,6 +25,7 @@ type rawLogPusher interface {
 // spooler durably records accepted logs before the handler reports acceptance.
 type spooler interface {
 	Append([]model.RawLog) error
+	Ack(logID string)
 }
 
 // Counts the log entries accepted by the ingestion handler.
@@ -113,6 +114,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 			}
 
 			if pushError := handlerConfiguration.rawLogPusher.PushBatch(rawLogs); pushError != nil {
+				handlerConfiguration.voidSpooledBatch(rawLogs)
 				if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
 					WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
 					return
@@ -154,6 +156,16 @@ func (configuration *logIngestionHandlerConfiguration) recordLogsReceived(validE
 		return
 	}
 	configuration.metricsRecorder.RecordLogsReceived(validEntries)
+}
+
+// Marks a spooled batch as handled after the queue refused it, so a batch the client was told was rejected is never replayed into the pipeline at the next startup.
+func (configuration *logIngestionHandlerConfiguration) voidSpooledBatch(rawLogs []model.RawLog) {
+	if configuration.spooler == nil {
+		return
+	}
+	for _, rawLog := range rawLogs {
+		configuration.spooler.Ack(rawLog.LogID)
+	}
 }
 
 // LogIngestionHandlerOption configures the log ingestion handler.

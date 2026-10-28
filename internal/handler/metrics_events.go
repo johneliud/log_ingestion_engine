@@ -1,16 +1,29 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"slices"
+	"time"
 
+	"github.com/johneliud/log_ingestion_engine/internal/config"
 	"github.com/johneliud/log_ingestion_engine/internal/metrics"
 )
 
-// Returns a handler that streams metrics snapshots as server-sent events. Clients connect with EventSource and receive a snapshot whenever any counter changes, plus an initial snapshot immediately after connecting.
-func NewMetricsEventsHandler(metricsRegistry *metrics.Metrics, corsAllowedOrigins []string) http.HandlerFunc {
+// How often each connected stream refreshes the queue backlog from the management API, so streamed snapshots carry a fresh count instead of the value left behind by the last JSON request.
+const backlogRefreshInterval = 2 * time.Second
+
+// Returns a handler that streams metrics snapshots as server-sent events.
+func NewMetricsEventsHandler(metricsRegistry *metrics.Metrics, applicationConfiguration config.ApplicationConfiguration) http.HandlerFunc {
+	return newMetricsEventsHandler(metricsRegistry, applicationConfiguration, backlogRefreshInterval)
+}
+
+// Returns a metrics events handler with a configurable backlog refresh interval.
+func newMetricsEventsHandler(metricsRegistry *metrics.Metrics, applicationConfiguration config.ApplicationConfiguration, backlogRefreshInterval time.Duration) http.HandlerFunc {
+	queueBacklogFetcher := newQueueBacklogFetcher(applicationConfiguration)
+	corsAllowedOrigins := applicationConfiguration.CorsAllowedOrigins
 	return func(responseWriter http.ResponseWriter, request *http.Request) {
 		origin := request.Header.Get("Origin")
 		if origin != "" && !isOriginAllowed(origin, corsAllowedOrigins) {
@@ -38,6 +51,10 @@ func NewMetricsEventsHandler(metricsRegistry *metrics.Metrics, corsAllowedOrigin
 		channel := metricsRegistry.Subscribe()
 		defer metricsRegistry.Unsubscribe(channel)
 
+		streamContext, stopBacklogRefresh := context.WithCancel(request.Context())
+		defer stopBacklogRefresh()
+		go refreshQueueBacklog(streamContext, metricsRegistry, queueBacklogFetcher, backlogRefreshInterval)
+
 		// Send the current snapshot immediately so the client is never left waiting.
 		initial := metricsRegistry.Snapshot()
 		if writeError := writeEvent(responseWriter, flusher, initial); writeError != nil {
@@ -58,6 +75,20 @@ func NewMetricsEventsHandler(metricsRegistry *metrics.Metrics, corsAllowedOrigin
 					return
 				}
 			}
+		}
+	}
+}
+
+// Refreshes the queue backlog on a fixed interval until the stream context is cancelled.
+func refreshQueueBacklog(applicationContext context.Context, metricsRegistry *metrics.Metrics, queueBacklogFetcher *queueBacklogFetcher, backlogRefreshInterval time.Duration) {
+	refreshTicker := time.NewTicker(backlogRefreshInterval)
+	defer refreshTicker.Stop()
+	for {
+		select {
+		case <-applicationContext.Done():
+			return
+		case <-refreshTicker.C:
+			metricsRegistry.SetQueueBacklog(queueBacklogFetcher.readQueueBacklog(applicationContext, metricsRegistry.FallbackQueueBacklog()))
 		}
 	}
 }
