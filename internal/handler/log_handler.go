@@ -17,8 +17,14 @@ import (
 
 const applicationJSONMediaType = "application/json"
 
+// rawLogPusher accepts a validated batch into the raw_logs channel.
 type rawLogPusher interface {
 	PushBatch([]model.RawLog) error
+}
+
+// spooler durably records accepted logs before the handler reports acceptance.
+type spooler interface {
+	Append([]model.RawLog) error
 }
 
 // Counts the log entries accepted by the ingestion handler.
@@ -99,6 +105,13 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 				})
 			}
 
+			if handlerConfiguration.spooler != nil {
+				if pushError := handlerConfiguration.spooler.Append(rawLogs); pushError != nil {
+					WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion could not durably accept the batch")
+					return
+				}
+			}
+
 			if pushError := handlerConfiguration.rawLogPusher.PushBatch(rawLogs); pushError != nil {
 				if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
 					WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
@@ -129,6 +142,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 type logIngestionHandlerConfiguration struct {
 	maximumBodySizeInBytes int
 	rawLogPusher           rawLogPusher
+	spooler                spooler
 	currentTimeProvider    func() time.Time
 	trustedProxies         []string
 	metricsRecorder        ingestionMetricsRecorder
@@ -149,6 +163,13 @@ type LogIngestionHandlerOption func(*logIngestionHandlerConfiguration)
 func WithRawLogPusher(rawLogPusher rawLogPusher) LogIngestionHandlerOption {
 	return func(configuration *logIngestionHandlerConfiguration) {
 		configuration.rawLogPusher = rawLogPusher
+	}
+}
+
+// WithSpool configures the durable spool that accepts logs before the handler reports a 202.
+func WithSpool(spooler spooler) LogIngestionHandlerOption {
+	return func(configuration *logIngestionHandlerConfiguration) {
+		configuration.spooler = spooler
 	}
 }
 

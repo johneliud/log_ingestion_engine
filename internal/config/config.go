@@ -43,6 +43,7 @@ const (
 	environmentNameMetricsThroughputWindow           = "METRICS_THROUGHPUT_WINDOW"
 	environmentNameMetricsBacklogTimeout             = "METRICS_BACKLOG_TIMEOUT"
 	environmentNameShutdownGracePeriod               = "SHUTDOWN_GRACE_PERIOD"
+	environmentNameSpoolFilePath                     = "SPOOL_PATH"
 )
 
 const (
@@ -68,6 +69,7 @@ const (
 	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
+	DefaultSpoolFilePath                    = "ingestion-spool.log"
 	defaultMetricsThroughputWindow          = time.Minute
 	defaultMetricsBacklogTimeout            = 2 * time.Second
 	defaultShutdownGracePeriod              = 30 * time.Second
@@ -123,6 +125,7 @@ type ApplicationConfiguration struct {
 	WriteRetryBackoffDelays          []time.Duration
 	DeadLetterFilePath               string
 	DeadLetterMaximumFileSizeInBytes int
+	SpoolFilePath                    string
 	MetricsThroughputWindow          time.Duration
 	MetricsBacklogTimeout            time.Duration
 	ShutdownGracePeriod              time.Duration
@@ -318,6 +321,12 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 		return ApplicationConfiguration{}, deadLetterMaximumFileSizeInBytesError
 	}
 	applicationConfiguration.DeadLetterMaximumFileSizeInBytes = deadLetterMaximumFileSizeInBytes
+
+	spoolFilePath, spoolFilePathError := parseStringSetting(environmentVariables, environmentNameSpoolFilePath, DefaultSpoolFilePath)
+	if spoolFilePathError != nil {
+		return ApplicationConfiguration{}, spoolFilePathError
+	}
+	applicationConfiguration.SpoolFilePath = spoolFilePath
 
 	metricsThroughputWindow, metricsThroughputWindowError := parsePositiveDurationSetting(environmentVariables, environmentNameMetricsThroughputWindow, defaultMetricsThroughputWindow)
 	if metricsThroughputWindowError != nil {

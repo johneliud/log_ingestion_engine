@@ -11,6 +11,12 @@ import (
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 )
 
+// spooler acknowledges that a spooled log has been durably handled.
+type spooler interface {
+	Ack(logID string)
+	Compact()
+}
+
 // Stores one destination batch in durable storage.
 type batchStore func(destination model.Destination, enrichedLogs []model.EnrichedLog) error
 
@@ -38,6 +44,7 @@ type BatchWriterDependencies struct {
 	DeadLetterSink      deadLetterSink
 	CurrentTimeProvider func() time.Time
 	MetricsRecorder     storageMetricsRecorder
+	Spool               spooler
 }
 
 // Represents the buffered logs and in-flight flush state for one destination.
@@ -57,6 +64,7 @@ type BatchWriter struct {
 	deadLetterSink      deadLetterSink
 	currentTimeProvider func() time.Time
 	metricsRecorder     storageMetricsRecorder
+	spooler             spooler
 	buffers             map[model.Destination]*destinationBuffer
 }
 
@@ -90,6 +98,7 @@ func NewBatchWriter(dependencies BatchWriterDependencies) *BatchWriter {
 		deadLetterSink:      dependencies.DeadLetterSink,
 		currentTimeProvider: currentTimeProvider,
 		metricsRecorder:     dependencies.MetricsRecorder,
+		spooler:             dependencies.Spool,
 		buffers:             buffers,
 	}
 }
@@ -195,6 +204,7 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 		storeError := batchWriter.storeBatch(destination, enrichedLogs)
 		if storeError == nil {
 			batchWriter.recordStoredMessages(len(enrichedLogs))
+			batchWriter.ackSpooled(enrichedLogs)
 			return nil
 		}
 		batchWriter.recordWriteFailure()
@@ -211,6 +221,7 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 			if deadLetterError != nil {
 				return deadLetterError
 			}
+			batchWriter.ackSpooled(enrichedLogs)
 			return nil
 		}
 
@@ -226,6 +237,7 @@ func (batchWriter *BatchWriter) storeWithRetries(destination model.Destination, 
 				if deadLetterError != nil {
 					return deadLetterError
 				}
+				batchWriter.ackSpooled(enrichedLogs)
 				return nil
 			}
 			return waitError
@@ -280,6 +292,17 @@ func (batchWriter *BatchWriter) recordDeadLetteredLog() {
 	}
 	batchWriter.metricsRecorder.RecordDeadLetteredLog()
 	batchWriter.metricsRecorder.RecordQueueMessageReleased()
+}
+
+// ackSpooled marks every log in the batch as durably handled so startup replay skips them.
+func (batchWriter *BatchWriter) ackSpooled(enrichedLogs []model.EnrichedLog) {
+	if batchWriter.spooler == nil {
+		return
+	}
+	for _, enrichedLog := range enrichedLogs {
+		batchWriter.spooler.Ack(enrichedLog.LogID)
+	}
+	batchWriter.spooler.Compact()
 }
 
 // Waits for the retry delay unless the application context is cancelled first.

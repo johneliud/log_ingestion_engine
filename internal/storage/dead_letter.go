@@ -157,6 +157,10 @@ func (deadLetterWriter *DeadLetterWriter) writeEntry(deadLetterFile **os.File, c
 		return
 	}
 	*currentFileSizeInBytes += int64(writtenByteCount)
+
+	if syncError := (*deadLetterFile).Sync(); syncError != nil {
+		slog.Error("syncing dead letter file failed", "error", syncError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
+	}
 }
 
 // Opens the dead letter file for appending and reports its current size.
