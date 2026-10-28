@@ -166,3 +166,107 @@ func (spool *Spool) Unacked() ([]model.RawLog, error) {
 	}
 	return unacked, nil
 }
+
+// Removes the spool and ack files when every spooled log has been acknowledged, so the files do not grow without bound.
+func (spool *Spool) Compact() {
+	spool.mu.Lock()
+	defer spool.mu.Unlock()
+
+	if spool.spooled == 0 || spool.spooled != spool.ackedCnt {
+		return
+	}
+
+	if _, seekError := spool.file.Seek(0, 0); seekError != nil {
+		return
+	}
+
+	if truncError := spool.file.Truncate(0); truncError != nil {
+		return
+	}
+
+	if _, seekError := spool.ackFile.Seek(0, 0); seekError != nil {
+		return
+	}
+
+	if truncError := spool.ackFile.Truncate(0); truncError != nil {
+		return
+	}
+
+	spool.acked = make(map[string]bool)
+	spool.spooled = 0
+	spool.ackedCnt = 0
+}
+
+// Closes the spool files.
+func (spool *Spool) Close() error {
+	spool.mu.Lock()
+	defer spool.mu.Unlock()
+
+	var closeErrors []error
+	if spool.file != nil {
+		if closeError := spool.file.Close(); closeError != nil {
+			closeErrors = append(closeErrors, closeError)
+		}
+		spool.file = nil
+	}
+
+	if spool.ackFile != nil {
+		if closeError := spool.ackFile.Close(); closeError != nil {
+			closeErrors = append(closeErrors, closeError)
+		}
+		spool.ackFile = nil
+	}
+
+	if len(closeErrors) > 0 {
+		return closeErrors[0]
+	}
+	return nil
+}
+
+// Reads every acknowledged log identifier from the sidecar file.
+func (spool *Spool) loadAcks() error {
+	ackFile, openError := os.Open(spool.ackPath)
+	if openError != nil {
+		if errors.Is(openError, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("opening spool ack file %q: %w", spool.ackPath, openError)
+	}
+	defer ackFile.Close()
+
+	scanner := bufio.NewScanner(ackFile)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		logID := scanner.Text()
+		if logID != "" {
+			spool.acked[logID] = true
+			spool.ackedCnt++
+		}
+	}
+	return scanner.Err()
+}
+
+// Counts the lines currently held by the spool file.
+func (spool *Spool) countSpooled() error {
+	info, statError := spool.file.Stat()
+	if statError != nil {
+		return fmt.Errorf("stating spool file: %w", statError)
+	}
+
+	spool.spooled = 0
+	if info.Size() == 0 {
+		return nil
+	}
+
+	if _, seekError := spool.file.Seek(0, 0); seekError != nil {
+		return fmt.Errorf("seeking spool file: %w", seekError)
+	}
+	scanner := bufio.NewScanner(spool.file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if len(scanner.Bytes()) > 0 {
+			spool.spooled++
+		}
+	}
+	return scanner.Err()
+}
