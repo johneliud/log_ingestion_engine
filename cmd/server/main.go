@@ -124,7 +124,7 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	logEnricher := enrich.NewLogEnricher(applicationConfiguration.ApplicationEnvironment, nil)
 
-	serviceRouter, routerError := router.NewServiceRouter(applicationConfiguration.RoutingConfigurationFilePath, applicationConfiguration.DefaultDestination)
+	serviceRouter, routerError := router.NewServiceRouter(applicationConfiguration.RoutingRules, applicationConfiguration.DefaultDestination)
 	if routerError != nil {
 		cancelPipelineWork()
 		cancelStorageWork()
@@ -263,10 +263,7 @@ func replaySpooledLogs(rawLogsQueue *pipeline.RawLogsQueue, spooledLogs []model.
 		chunkSize = 1
 	}
 	for chunkStart := 0; chunkStart < len(spooledLogs); chunkStart += chunkSize {
-		chunkEnd := chunkStart + chunkSize
-		if chunkEnd > len(spooledLogs) {
-			chunkEnd = len(spooledLogs)
-		}
+		chunkEnd := min(chunkStart+chunkSize, len(spooledLogs))
 		if pushError := rawLogsQueue.PushBatchWhenCapacityFrees(applicationContext, spooledLogs[chunkStart:chunkEnd]); pushError != nil {
 			slog.Error("replaying spooled logs into the pipeline failed", "error", pushError, "chunk_start", chunkStart, "chunk_end", chunkEnd)
 			return

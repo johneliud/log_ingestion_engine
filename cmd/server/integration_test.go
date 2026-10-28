@@ -278,11 +278,11 @@ func TestIntegration_FullPipelineStoresTheEnrichedAndRoutedLogsInTheDestinationD
 	requireTheBroker(t, applicationConfiguration)
 	purgeTheDestinationQueues(t, applicationConfiguration)
 
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{
+	applicationConfiguration.RoutingRules = map[string]string{
 		"claims":   "service1",
 		"payments": "service2",
 		"policy":   "service3",
-	})
+	}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices([]string{"claims", "payments", "policy"}))
@@ -331,7 +331,7 @@ func TestIntegration_ReplaysASpoolLargerThanTheRawLogsQueueCapacity(t *testing.T
 	applicationConfiguration.ConsumerBatchSize = 50
 	applicationConfiguration.ChannelSendTimeout = 20 * time.Millisecond
 	applicationConfiguration.SpoolFilePath = filepath.Join(t.TempDir(), "ingestion-spool.log")
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 
 	// More than twice the queue capacity: a replay that runs before the pipeline consumers would fill the queue and drop the overflow.
 	const spooledLogCount = 250
@@ -372,7 +372,7 @@ func TestIntegration_ReplaysASpoolLargerThanTheRawLogsQueueCapacity(t *testing.T
 
 func TestIntegration_RabbitMQOutageStoresTheAcceptedLogsThroughTheFallback(t *testing.T) {
 	applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices([]string{"claims", "claims", "claims"}))
@@ -402,11 +402,11 @@ func TestIntegration_SQLiteBatchingFlushesAtTheBatchSizeAndAtTheFlushInterval(t 
 
 	for _, batchingCase := range batchingCases {
 		t.Run(batchingCase.name, func(t *testing.T) {
-			applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
-			applicationConfiguration.WriteBatchSize = batchingCase.writeBatchSize
-			applicationConfiguration.WriteFlushInterval = batchingCase.writeFlushInterval
-			writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
-			serverApplication := newTestServerApplication(t, applicationConfiguration)
+		applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
+		applicationConfiguration.WriteBatchSize = batchingCase.writeBatchSize
+		applicationConfiguration.WriteFlushInterval = batchingCase.writeFlushInterval
+		applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
+		serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 			serviceNames := make([]string, 0, batchingCase.logCount)
 			for logIndex := 0; logIndex < batchingCase.logCount; logIndex++ {
@@ -429,7 +429,7 @@ func TestIntegration_SQLiteBatchingFlushesAtTheBatchSizeAndAtTheFlushInterval(t 
 func TestIntegration_RetriesAndDeadLettersTheLogsThatCannotBeStored(t *testing.T) {
 	applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
 	applicationConfiguration.DeadLetterMaximumFileSizeInBytes = 1024
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	if closeError := serverApplication.sqliteLogStore.Close(); closeError != nil {
@@ -472,7 +472,7 @@ func TestIntegration_GracefulShutdownStoresEveryAcceptedLog(t *testing.T) {
 	requireTheBroker(t, applicationConfiguration)
 	purgeTheDestinationQueues(t, applicationConfiguration)
 
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	acceptedLogCount := 200

@@ -39,7 +39,7 @@ func testApplicationConfiguration(t *testing.T) config.ApplicationConfiguration 
 		ChannelSendTimeout:               100 * time.Millisecond,
 		MaximumBodySizeInBytes:           1 << 20,
 		ApplicationEnvironment:           "test",
-		RoutingConfigurationFilePath:     filepath.Join(temporaryDirectory, "routing.json"),
+		RoutingRules:                     map[string]string{},
 		DefaultDestination:               "service1",
 		RabbitMQHost:                     "127.0.0.1",
 		RabbitMQPort:                     1,
@@ -298,11 +298,11 @@ func TestServerApplication_StoresEveryAcceptedLogOrDeadLettersItWhenTheApplicati
 	t.Parallel()
 
 	applicationConfiguration := testApplicationConfiguration(t)
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{
+	applicationConfiguration.RoutingRules = map[string]string{
 		"claims":   "service1",
 		"payments": "service2",
 		"policy":   "service3",
-	})
+	}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	acceptedLogCount := 0
@@ -379,7 +379,7 @@ func TestServerApplication_DeadLettersTheLogsThePipelineCouldNotProcess(t *testi
 	t.Parallel()
 
 	applicationConfiguration := testApplicationConfiguration(t)
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service2"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service2"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	serverApplication.cancelPipelineWork()
