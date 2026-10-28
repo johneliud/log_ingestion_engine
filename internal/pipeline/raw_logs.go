@@ -25,7 +25,7 @@ type RawLogsQueue struct {
 	buffer      []model.RawLog
 	capacity    int
 	sendTimeout time.Duration
-	isClosed bool
+	isClosed    bool
 }
 
 // Returns a new raw logs queue with bounded capacity.
