@@ -314,8 +314,8 @@ func TestNewLogIngestionHandler_QueueAdmission(t *testing.T) {
 			if response.Code != testCase.wantStatus {
 				t.Fatalf("status = %d, want %d; body: %s", response.Code, testCase.wantStatus, response.Body.String())
 			}
-			if len(queue.RawLogsChannel()) != testCase.wantQueued {
-				t.Fatalf("queued entries = %d, want %d", len(queue.RawLogsChannel()), testCase.wantQueued)
+			if queue.Len() != testCase.wantQueued {
+				t.Fatalf("queued entries = %d, want %d", queue.Len(), testCase.wantQueued)
 			}
 			if testCase.wantError != "" {
 				var body model.ErrorResponse
@@ -324,6 +324,94 @@ func TestNewLogIngestionHandler_QueueAdmission(t *testing.T) {
 				}
 				if body.Error != testCase.wantError {
 					t.Fatalf("error = %q, want %q", body.Error, testCase.wantError)
+				}
+			}
+		})
+	}
+}
+
+// Records the logs appended to a fake spool and the identifiers acknowledged against it.
+type recordingSpooler struct {
+	mutex           sync.Mutex
+	appendedLogIDs  []string
+	acknowledgedIDs []string
+	ackError        error
+}
+
+// Records the appended logs.
+func (recordingSpoolerInstance *recordingSpooler) Append(rawLogs []model.RawLog) error {
+	recordingSpoolerInstance.mutex.Lock()
+	defer recordingSpoolerInstance.mutex.Unlock()
+	for _, rawLog := range rawLogs {
+		recordingSpoolerInstance.appendedLogIDs = append(recordingSpoolerInstance.appendedLogIDs, rawLog.LogID)
+	}
+	return nil
+}
+
+// Records one acknowledged log identifier.
+func (recordingSpoolerInstance *recordingSpooler) Ack(logID string) error {
+	return recordingSpoolerInstance.AckAll([]string{logID})
+}
+
+func (recordingSpoolerInstance *recordingSpooler) AckAll(logIDs []string) error {
+	if recordingSpoolerInstance.ackError != nil {
+		return recordingSpoolerInstance.ackError
+	}
+	recordingSpoolerInstance.mutex.Lock()
+	defer recordingSpoolerInstance.mutex.Unlock()
+	recordingSpoolerInstance.acknowledgedIDs = append(recordingSpoolerInstance.acknowledgedIDs, logIDs...)
+	return nil
+}
+
+// Returns the acknowledged log identifiers.
+func (recordingSpoolerInstance *recordingSpooler) acknowledgedLogIDs() []string {
+	recordingSpoolerInstance.mutex.Lock()
+	defer recordingSpoolerInstance.mutex.Unlock()
+	return append([]string(nil), recordingSpoolerInstance.acknowledgedIDs...)
+}
+
+func TestNewLogIngestionHandler_VoidsTheSpooledBatchWhenTheQueueRejectsIt(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name           string
+		capacity       int
+		prefill        int
+		body           string
+		wantStatusCode int
+	}{
+		{name: "an oversized batch", capacity: 1, prefill: 0, body: `[` + validEntryJSON + `,` + validEntryJSON + `]`, wantStatusCode: http.StatusRequestEntityTooLarge},
+		{name: "a temporary overload", capacity: 2, prefill: 1, body: `[` + validEntryJSON + `,` + validEntryJSON + `]`, wantStatusCode: http.StatusServiceUnavailable},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			rawLogsQueue := pipeline.NewRawLogsQueue(testCase.capacity, 20*time.Millisecond)
+			if pushError := rawLogsQueue.PushBatch(make([]model.RawLog, testCase.prefill)); pushError != nil {
+				t.Fatal(pushError)
+			}
+			spooler := &recordingSpooler{}
+			request := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(testCase.body))
+			request.Header.Set("Content-Type", "application/json")
+			responseRecorder := httptest.NewRecorder()
+			NewLogIngestionHandler(testMaximumBodySizeInBytes, WithRawLogPusher(rawLogsQueue), WithSpool(spooler)).ServeHTTP(responseRecorder, request)
+
+			if responseRecorder.Code != testCase.wantStatusCode {
+				t.Fatalf("status = %d, want %d", responseRecorder.Code, testCase.wantStatusCode)
+			}
+			appendedLogIDs := spooler.appendedLogIDs
+			if len(appendedLogIDs) == 0 {
+				t.Fatal("the batch was never spooled")
+			}
+			acknowledgedLogIDs := spooler.acknowledgedLogIDs()
+			if len(acknowledgedLogIDs) != len(appendedLogIDs) {
+				t.Fatalf("acknowledged log count = %d, want %d; a rejected batch must be voided so it is never replayed", len(acknowledgedLogIDs), len(appendedLogIDs))
+			}
+			acknowledgedLogIDSet := make(map[string]bool, len(acknowledgedLogIDs))
+			for _, acknowledgedLogID := range acknowledgedLogIDs {
+				acknowledgedLogIDSet[acknowledgedLogID] = true
+			}
+			for _, appendedLogID := range appendedLogIDs {
+				if !acknowledgedLogIDSet[appendedLogID] {
+					t.Errorf("spooled log %q was not acknowledged after the queue rejected the batch", appendedLogID)
 				}
 			}
 		})
@@ -497,4 +585,30 @@ func errorMessageForFieldInRejected(fieldErrors []model.FieldError, fieldName st
 		}
 	}
 	return ""
+}
+
+type failingRawLogPusher struct{ err error }
+
+func (pusher failingRawLogPusher) PushBatch([]model.RawLog) error { return pusher.err }
+
+func TestLogHandlerAcceptsSpooledBatchWhenVoidingFails(t *testing.T) {
+	for _, queueError := range []error{pipeline.ErrBatchTooLarge, pipeline.ErrQueueOverloaded} {
+		t.Run(queueError.Error(), func(t *testing.T) {
+			spool := &recordingSpooler{ackError: fmt.Errorf("disk sync failed")}
+			request := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(`[{"timestamp":"2026-10-28T12:00:00Z","service":"claims","level":"INFO","message":"keep for replay"}]`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			NewLogIngestionHandler(testMaximumBodySizeInBytes, WithSpool(spool), WithRawLogPusher(failingRawLogPusher{queueError})).ServeHTTP(response, request)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202 because batch remains durable", response.Code)
+			}
+			var accepted model.AcceptedResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil || accepted.BatchID == "" {
+				t.Fatalf("accepted response = %+v, %v", accepted, err)
+			}
+			if len(spool.appendedLogIDs) != 1 || len(spool.acknowledgedIDs) != 0 {
+				t.Fatal("batch must remain spooled for replay")
+			}
+		})
+	}
 }

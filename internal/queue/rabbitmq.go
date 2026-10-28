@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
@@ -22,11 +23,14 @@ var (
 	ErrPublisherClosed = errors.New("the publisher is closed")
 )
 
+// The error reported when the broker accepted no part of a publish batch.
+var errPublishNotConfirmed = errors.New("publishing to rabbitmq was not confirmed by the broker")
+
 // Attempts to establish the broker connection used by the publisher.
 type brokerConnectOperation func() error
 
-// Publishes one enriched log to the currently connected broker.
-type brokerPublishOperation func(enrichedLog model.EnrichedLog) error
+// Publishes one batch of enriched logs to the currently connected broker.
+type brokerPublishOperation func(enrichedLogs []model.EnrichedLog) error
 
 // Waits between reconnect attempts and reports cancellation.
 type reconnectWaiter func(applicationContext context.Context, reconnectDelay time.Duration) error
@@ -39,6 +43,7 @@ type publishMetricsRecorder interface {
 // Holds the optional dependencies of the publisher.
 type publisherConfiguration struct {
 	metricsRecorder publishMetricsRecorder
+	publishSessions int
 }
 
 // PublisherOption configures the publisher.
@@ -51,17 +56,35 @@ func WithPublishedMessageRecorder(metricsRecorder publishMetricsRecorder) Publis
 	}
 }
 
+// Configures how many broker channels publish concurrently.
+func WithPublishSessionCount(publishSessions int) PublisherOption {
+	return func(configuration *publisherConfiguration) {
+		configuration.publishSessions = publishSessions
+	}
+}
+
+const (
+	defaultPublishSessionCount = 4
+	bufferedReturnCapacity     = 64
+)
+
+// Owns one broker channel with its own confirm mode and return notifications.
+type publishSession struct {
+	channel *amqp.Channel
+	returns chan amqp.Return
+}
+
 // Publisher publishes enriched logs to RabbitMQ with timeout and fallback.
 type Publisher struct {
 	mutex                    sync.RWMutex
 	applicationConfiguration config.ApplicationConfiguration
 	connection               *amqp.Connection
-	channel                  *amqp.Channel
+	sessions                 chan *publishSession
 	fallbackChannel          chan model.EnrichedLog
 	fallbackCapacity         int
+	publishSessionCount      int
 	isConnected              bool
 	isClosed                 bool
-	returns                  chan amqp.Return
 	connectionLostChannel    chan struct{}
 	connectOperation         brokerConnectOperation
 	publishOperation         brokerPublishOperation
@@ -74,18 +97,22 @@ func NewPublisher(applicationConfiguration config.ApplicationConfiguration, fall
 	if fallbackCapacity <= 0 {
 		fallbackCapacity = 10000
 	}
-	publisherConfiguration := publisherConfiguration{}
+	publisherConfiguration := publisherConfiguration{publishSessions: defaultPublishSessionCount}
 	for _, option := range options {
 		if option != nil {
 			option(&publisherConfiguration)
 		}
 	}
+	if publisherConfiguration.publishSessions <= 0 {
+		publisherConfiguration.publishSessions = defaultPublishSessionCount
+	}
 	publisher := &Publisher{
 		applicationConfiguration: applicationConfiguration,
 		fallbackChannel:          make(chan model.EnrichedLog, fallbackCapacity),
 		fallbackCapacity:         fallbackCapacity,
+		publishSessionCount:      publisherConfiguration.publishSessions,
+		sessions:                 make(chan *publishSession, publisherConfiguration.publishSessions),
 		isConnected:              false,
-		returns:                  make(chan amqp.Return, 1),
 		connectionLostChannel:    make(chan struct{}, 1),
 		metricsRecorder:          publisherConfiguration.metricsRecorder,
 	}
@@ -100,7 +127,7 @@ func (publisher *Publisher) Connect() error {
 	return publisher.connect()
 }
 
-// Connects to RabbitMQ, declares topology and starts watching for connection loss.
+// Connects to RabbitMQ, declares topology, opens the publish sessions and starts watching for connection loss.
 func (publisher *Publisher) connect() error {
 	connection, connectionError := DialBroker(publisher.applicationConfiguration)
 	if connectionError != nil {
@@ -109,53 +136,86 @@ func (publisher *Publisher) connect() error {
 		return connectionError
 	}
 
-	channel, channelError := connection.Channel()
-	if channelError != nil {
+	sessions, sessionsError := publisher.openPublishSessions(connection)
+	if sessionsError != nil {
 		connection.Close()
 		publisher.markDisconnected()
-		slog.Warn("failed to open rabbitmq channel, activating in-memory fallback", "error", channelError)
-		return channelError
-	}
-
-	if err := DeclareTopology(channel); err != nil {
-		channel.Close()
-		connection.Close()
-		publisher.markDisconnected()
-		slog.Warn("failed to declare rabbitmq topology, activating in-memory fallback", "error", err)
-		return err
-	}
-
-	if confirmError := channel.Confirm(false); confirmError != nil {
-		channel.Close()
-		connection.Close()
-		publisher.markDisconnected()
-		slog.Warn("failed to confirm rabbitmq publishing, activating in-memory fallback", "error", confirmError)
-		return confirmError
+		slog.Warn("failed to open rabbitmq publish sessions, activating in-memory fallback", "error", sessionsError)
+		return sessionsError
 	}
 
 	publisher.mutex.Lock()
-	previousChannel := publisher.channel
+	previousSessions := publisher.sessions
 	previousConnection := publisher.connection
-	if previousChannel != nil {
-		previousChannel.Close()
-	}
+	publisher.connection = connection
+	publisher.sessions = sessions
+	publisher.isConnected = true
+	publisher.mutex.Unlock()
+	closePreviousSessions(previousSessions)
 	if previousConnection != nil {
 		previousConnection.Close()
 	}
-	publisher.connection = connection
-	publisher.channel = channel
-	publisher.returns = channel.NotifyReturn(make(chan amqp.Return, 64))
-	publisher.isConnected = true
-	publisher.mutex.Unlock()
 
 	select {
 	case <-publisher.connectionLostChannel:
 	default:
 	}
-	go publisher.watchConnectionClose(connection, channel)
+	go publisher.watchConnectionClose(connection)
 
 	slog.Info("connected to rabbitmq", "host", publisher.applicationConfiguration.RabbitMQHost, "port", publisher.applicationConfiguration.RabbitMQPort)
 	return nil
+}
+
+// Opens one channel per publish session, declares the topology once and enables confirm mode plus return notifications on every session channel.
+func (publisher *Publisher) openPublishSessions(connection *amqp.Connection) (chan *publishSession, error) {
+	topologyChannel, topologyChannelError := connection.Channel()
+	if topologyChannelError != nil {
+		return nil, fmt.Errorf("opening the topology channel: %w", topologyChannelError)
+	}
+	defer topologyChannel.Close()
+
+	if topologyError := DeclareTopology(topologyChannel); topologyError != nil {
+		return nil, fmt.Errorf("declaring the rabbitmq topology: %w", topologyError)
+	}
+
+	sessions := make(chan *publishSession, publisher.publishSessionCount)
+	for sessionIndex := range publisher.publishSessionCount {
+		sessionChannel, channelError := connection.Channel()
+		if channelError != nil {
+			closePublishSessions(sessions)
+			return nil, fmt.Errorf("opening publish session %d: %w", sessionIndex, channelError)
+		}
+		if confirmError := sessionChannel.Confirm(false); confirmError != nil {
+			sessionChannel.Close()
+			closePublishSessions(sessions)
+			return nil, fmt.Errorf("enabling publisher confirms on session %d: %w", sessionIndex, confirmError)
+		}
+		sessions <- &publishSession{
+			channel: sessionChannel,
+			returns: sessionChannel.NotifyReturn(make(chan amqp.Return, bufferedReturnCapacity)),
+		}
+	}
+	return sessions, nil
+}
+
+// Closes every session in the channel.
+func closePublishSessions(sessions chan *publishSession) {
+	for {
+		select {
+		case session := <-sessions:
+			session.channel.Close()
+		default:
+			return
+		}
+	}
+}
+
+// Closes the previous generation of sessions after a reconnect replaced them.
+func closePreviousSessions(previousSessions chan *publishSession) {
+	if previousSessions == nil {
+		return
+	}
+	go closePublishSessions(previousSessions)
 }
 
 // Declares the exchanges, queues and bindings used by the publisher and the consumers.
@@ -222,13 +282,9 @@ func (publisher *Publisher) RunReconnectLoop(applicationContext context.Context)
 }
 
 // Watches the current broker connection and marks the publisher disconnected when it closes.
-func (publisher *Publisher) watchConnectionClose(connection *amqp.Connection, channel *amqp.Channel) {
+func (publisher *Publisher) watchConnectionClose(connection *amqp.Connection) {
 	connectionCloseNotifications := connection.NotifyClose(make(chan *amqp.Error, 1))
-	channelCloseNotifications := channel.NotifyClose(make(chan *amqp.Error, 1))
-	select {
-	case <-connectionCloseNotifications:
-	case <-channelCloseNotifications:
-	}
+	<-connectionCloseNotifications
 
 	publisher.mutex.RLock()
 	isCurrentConnection := publisher.connection == connection
@@ -238,93 +294,150 @@ func (publisher *Publisher) watchConnectionClose(connection *amqp.Connection, ch
 	}
 }
 
-// Publish publishes a log with timeout and activates fallback on failure.
+// Publish publishes one log with timeout and activates fallback on failure.
 func (publisher *Publisher) Publish(enrichedLog model.EnrichedLog) error {
+	return publisher.PublishBatch([]model.EnrichedLog{enrichedLog})
+}
+
+// PublishBatch publishes a batch of logs with one broker confirm and activates fallback for every log when the publish fails.
+func (publisher *Publisher) PublishBatch(enrichedLogs []model.EnrichedLog) error {
+	if len(enrichedLogs) == 0 {
+		return nil
+	}
 	if publisher.IsClosed() {
 		return ErrPublisherClosed
 	}
 	if !publisher.IsConnected() {
-		slog.Warn("rabbitmq not connected, using in-memory fallback", "destination", enrichedLog.Destination, "batch_id", enrichedLog.BatchID)
-		return publisher.publishToFallbackAndRecord(enrichedLog)
+		slog.Warn("rabbitmq not connected, using in-memory fallback", "log_count", len(enrichedLogs), "batch_id", enrichedLogs[0].BatchID)
+		return publisher.publishBatchToFallbackAndRecord(enrichedLogs)
 	}
 
-	if publishError := publisher.publishOperation(enrichedLog); publishError != nil {
+	if publishError := publisher.publishOperation(enrichedLogs); publishError != nil {
 		publisher.markDisconnected()
-		slog.Warn("publishing to rabbitmq failed, using in-memory fallback", "error", publishError, "destination", enrichedLog.Destination, "batch_id", enrichedLog.BatchID)
-		return publisher.publishToFallbackAndRecord(enrichedLog)
+		slog.Warn("publishing to rabbitmq failed, using in-memory fallback", "error", publishError, "log_count", len(enrichedLogs), "batch_id", enrichedLogs[0].BatchID)
+		return publisher.publishBatchToFallbackAndRecord(enrichedLogs)
 	}
 
-	publisher.recordPublishedMessage()
+	publisher.recordPublishedMessages(len(enrichedLogs))
 	return nil
 }
 
-// Publishes an enriched log to the in-memory fallback and counts it as in flight.
-func (publisher *Publisher) publishToFallbackAndRecord(enrichedLog model.EnrichedLog) error {
-	if fallbackError := publisher.publishToFallback(enrichedLog); fallbackError != nil {
-		return fallbackError
+// Publishes a batch of enriched logs to the in-memory fallback and counts them as in flight.
+func (publisher *Publisher) publishBatchToFallbackAndRecord(enrichedLogs []model.EnrichedLog) error {
+	var fallbackErrors []error
+	recordedCount := 0
+	for _, enrichedLog := range enrichedLogs {
+		if fallbackError := publisher.publishToFallback(enrichedLog); fallbackError != nil {
+			fallbackErrors = append(fallbackErrors, fallbackError)
+			continue
+		}
+		recordedCount++
 	}
-	publisher.recordPublishedMessage()
-	return nil
+	publisher.recordPublishedMessages(recordedCount)
+	return errors.Join(fallbackErrors...)
 }
 
-// Counts one message that is now waiting to be stored.
-func (publisher *Publisher) recordPublishedMessage() {
+// Counts the messages that are now waiting to be stored.
+func (publisher *Publisher) recordPublishedMessages(messageCount int) {
 	if publisher.metricsRecorder == nil {
 		return
 	}
-	publisher.metricsRecorder.RecordQueueMessagePublished()
+	for range make([]struct{}, messageCount) {
+		publisher.metricsRecorder.RecordQueueMessagePublished()
+	}
 }
 
-// Publishes an enriched log to RabbitMQ and reports broker failures.
-func (publisher *Publisher) publishToBroker(enrichedLog model.EnrichedLog) error {
+// Publishes a batch on one checked-out session and verifies every confirmation.
+func (publisher *Publisher) publishToBroker(enrichedLogs []model.EnrichedLog) error {
+	session, sessionError := publisher.checkoutSession()
+	if sessionError != nil {
+		return sessionError
+	}
+	defer publisher.returnSession(session)
+
+	publishContext, publishContextCancel := context.WithTimeout(context.Background(), publisher.applicationConfiguration.PublishTimeout)
+	defer publishContextCancel()
+
+	confirmations := make([]*amqp.DeferredConfirmation, 0, len(enrichedLogs))
+	for _, enrichedLog := range enrichedLogs {
+		body, marshalError := json.Marshal(enrichedLog)
+		if marshalError != nil {
+			return marshalError
+		}
+
+		confirmation, publishError := session.channel.PublishWithDeferredConfirmWithContext(
+			publishContext,
+			exchangeNameForDestination(enrichedLog.Destination),
+			config.RoutingKeyLogWrite,
+			true,
+			false,
+			amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Body:         body,
+			},
+		)
+		if publishError != nil {
+			return publishError
+		}
+		if confirmation == nil {
+			return errPublishNotConfirmed
+		}
+		confirmations = append(confirmations, confirmation)
+	}
+
+	for _, confirmation := range confirmations {
+		publishConfirmed, publishConfirmationError := confirmation.WaitContext(publishContext)
+		if publishConfirmationError != nil || !publishConfirmed {
+			return errPublishNotConfirmed
+		}
+	}
+
+	// The broker sends a return before the confirm of an unroutable message, so any return waiting on this exclusive session belongs to this batch.
+	select {
+	case <-session.returns:
+		return errPublishNotConfirmed
+	default:
+		return nil
+	}
+}
+
+// Checks out one publish session, waiting for a free one until the publish timeout elapses.
+func (publisher *Publisher) checkoutSession() (*publishSession, error) {
 	publisher.mutex.RLock()
-	channel := publisher.channel
-	returns := publisher.returns
+	sessions := publisher.sessions
 	publisher.mutex.RUnlock()
-	if channel == nil {
-		return ErrNotConnected
+	if sessions == nil {
+		return nil, ErrNotConnected
 	}
 
 	publishContext, publishContextCancel := context.WithTimeout(context.Background(), publisher.applicationConfiguration.PublishTimeout)
 	defer publishContextCancel()
 
-	body, marshalError := json.Marshal(enrichedLog)
-	if marshalError != nil {
-		return marshalError
-	}
-
-	deferredConfirmation, publishError := channel.PublishWithDeferredConfirmWithContext(
-		publishContext,
-		exchangeNameForDestination(enrichedLog.Destination),
-		config.RoutingKeyLogWrite,
-		true,
-		false,
-		amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "application/json",
-			Body:         body,
-		},
-	)
-	if publishError != nil {
-		return publishError
-	}
-
-	publishConfirmed := false
-	publishConfirmationError := error(nil)
-	if deferredConfirmation != nil {
-		publishConfirmed, publishConfirmationError = deferredConfirmation.WaitContext(publishContext)
-	}
-	unroutable := false
 	select {
-	case <-returns:
-		unroutable = true
-	default:
+	case session := <-sessions:
+		if session.channel.IsClosed() {
+			return nil, ErrNotConnected
+		}
+		return session, nil
+	case <-publishContext.Done():
+		return nil, ErrNotConnected
 	}
-	if publishConfirmationError != nil || !publishConfirmed || unroutable {
-		return errors.New("publishing to rabbitmq was not confirmed by the broker")
-	}
+}
 
-	return nil
+// Gives a publish session back to the pool.
+func (publisher *Publisher) returnSession(session *publishSession) {
+	publisher.mutex.RLock()
+	sessions := publisher.sessions
+	publisher.mutex.RUnlock()
+	if sessions == nil || session == nil {
+		return
+	}
+	select {
+	case sessions <- session:
+	default:
+		session.channel.Close()
+	}
 }
 
 // Publishes an enriched log to the bounded in-memory fallback, reporting a full buffer.
@@ -385,18 +498,29 @@ func (publisher *Publisher) FallbackChannel() <-chan model.EnrichedLog {
 	return publisher.fallbackChannel
 }
 
-// Closes the broker connection and channel held by the publisher.
+// Closes the broker connection and every publish session held by the publisher.
 func (publisher *Publisher) Close() error {
 	publisher.mutex.Lock()
 	defer publisher.mutex.Unlock()
 
 	publisher.isClosed = true
+	sessions := publisher.sessions
+	publisher.sessions = nil
 	var closeError error
-	if publisher.channel != nil {
-		if channelCloseError := publisher.channel.Close(); channelCloseError != nil && !errors.Is(channelCloseError, amqp.ErrClosed) {
-			closeError = channelCloseError
+	if sessions != nil {
+		for drained := false; !drained; {
+			select {
+			case session := <-sessions:
+				if session == nil {
+					continue
+				}
+				if channelCloseError := session.channel.Close(); channelCloseError != nil && !errors.Is(channelCloseError, amqp.ErrClosed) {
+					closeError = channelCloseError
+				}
+			default:
+				drained = true
+			}
 		}
-		publisher.channel = nil
 	}
 	if publisher.connection != nil {
 		if connectionCloseError := publisher.connection.Close(); connectionCloseError != nil && !errors.Is(connectionCloseError, amqp.ErrClosed) {

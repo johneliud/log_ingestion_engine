@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"time"
@@ -17,8 +18,16 @@ import (
 
 const applicationJSONMediaType = "application/json"
 
+// rawLogPusher accepts a validated batch into the raw_logs channel.
 type rawLogPusher interface {
 	PushBatch([]model.RawLog) error
+}
+
+// spooler durably records accepted logs before the handler reports acceptance.
+type spooler interface {
+	Append([]model.RawLog) error
+	Ack(logID string) error
+	AckAll(logIDs []string) error
 }
 
 // Counts the log entries accepted by the ingestion handler.
@@ -99,13 +108,25 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 				})
 			}
 
-			if pushError := handlerConfiguration.rawLogPusher.PushBatch(rawLogs); pushError != nil {
-				if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
-					WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
+			if handlerConfiguration.spooler != nil {
+				if pushError := handlerConfiguration.spooler.Append(rawLogs); pushError != nil {
+					WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion could not durably accept the batch")
 					return
 				}
-				WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
-				return
+			}
+
+			if pushError := handlerConfiguration.rawLogPusher.PushBatch(rawLogs); pushError != nil {
+				if voidError := handlerConfiguration.voidSpooledBatch(rawLogs); voidError != nil {
+					// The durable spool still owns this batch; report acceptance for replay.
+					slog.Error("voiding spooled batch failed; retaining batch for replay", "error", voidError, "batch_id", batchID)
+				} else {
+					if errors.Is(pushError, pipeline.ErrBatchTooLarge) {
+						WriteJSONError(responseWriter, http.StatusRequestEntityTooLarge, "batch exceeds ingestion queue capacity")
+						return
+					}
+					WriteJSONError(responseWriter, http.StatusServiceUnavailable, "ingestion overloaded")
+					return
+				}
 			}
 			handlerConfiguration.recordLogsReceived(validEntries)
 			writeJSONResponse(responseWriter, http.StatusAccepted, model.AcceptedResponse{
@@ -129,6 +150,7 @@ func NewLogIngestionHandler(maximumBodySizeInBytes int, options ...LogIngestionH
 type logIngestionHandlerConfiguration struct {
 	maximumBodySizeInBytes int
 	rawLogPusher           rawLogPusher
+	spooler                spooler
 	currentTimeProvider    func() time.Time
 	trustedProxies         []string
 	metricsRecorder        ingestionMetricsRecorder
@@ -142,6 +164,18 @@ func (configuration *logIngestionHandlerConfiguration) recordLogsReceived(validE
 	configuration.metricsRecorder.RecordLogsReceived(validEntries)
 }
 
+// Marks a spooled batch as handled after the queue refused it, so a batch the client was told was rejected is never replayed into the pipeline at the next startup.
+func (configuration *logIngestionHandlerConfiguration) voidSpooledBatch(rawLogs []model.RawLog) error {
+	if configuration.spooler == nil {
+		return nil
+	}
+	logIDs := make([]string, len(rawLogs))
+	for index, rawLog := range rawLogs {
+		logIDs[index] = rawLog.LogID
+	}
+	return configuration.spooler.AckAll(logIDs)
+}
+
 // LogIngestionHandlerOption configures the log ingestion handler.
 type LogIngestionHandlerOption func(*logIngestionHandlerConfiguration)
 
@@ -149,6 +183,13 @@ type LogIngestionHandlerOption func(*logIngestionHandlerConfiguration)
 func WithRawLogPusher(rawLogPusher rawLogPusher) LogIngestionHandlerOption {
 	return func(configuration *logIngestionHandlerConfiguration) {
 		configuration.rawLogPusher = rawLogPusher
+	}
+}
+
+// WithSpool configures the durable spool that accepts logs before the handler reports a 202.
+func WithSpool(spooler spooler) LogIngestionHandlerOption {
+	return func(configuration *logIngestionHandlerConfiguration) {
+		configuration.spooler = spooler
 	}
 }
 

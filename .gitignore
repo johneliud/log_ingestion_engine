@@ -20,3 +20,5 @@ fonts/
 
 loadtest
 !cmd/loadtest
+
+logs/

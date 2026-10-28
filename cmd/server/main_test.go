@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -39,7 +40,7 @@ func testApplicationConfiguration(t *testing.T) config.ApplicationConfiguration 
 		ChannelSendTimeout:               100 * time.Millisecond,
 		MaximumBodySizeInBytes:           1 << 20,
 		ApplicationEnvironment:           "test",
-		RoutingConfigurationFilePath:     filepath.Join(temporaryDirectory, "routing.json"),
+		RoutingRules:                     map[string]string{},
 		DefaultDestination:               "service1",
 		RabbitMQHost:                     "127.0.0.1",
 		RabbitMQPort:                     1,
@@ -143,19 +144,6 @@ func countDeadLetterEntries(t *testing.T, deadLetterFilePath string) int {
 	return deadLetterEntryCount
 }
 
-// Writes the routing rules that send each service to its destination.
-func writeRoutingRules(t *testing.T, routingConfigurationFilePath string, routingRules map[string]string) {
-	t.Helper()
-
-	serializedRules, marshalError := json.Marshal(routingRules)
-	if marshalError != nil {
-		t.Fatalf("marshalling the routing rules failed: %v", marshalError)
-	}
-	if writeError := os.WriteFile(routingConfigurationFilePath, serializedRules, 0o644); writeError != nil {
-		t.Fatalf("writing the routing rules failed: %v", writeError)
-	}
-}
-
 // Returns one request body with a log entry for every service name.
 func logBatchBodyForServices(serviceNames []string) string {
 	logEntries := make([]string, 0, len(serviceNames))
@@ -211,14 +199,10 @@ func TestServerApplication_RoutesEveryPageAndMethod(t *testing.T) {
 		requestPath    string
 		expectedStatus int
 	}{
-		{name: "home page", method: http.MethodGet, requestPath: "/", expectedStatus: http.StatusOK},
 		{name: "unknown path", method: http.MethodGet, requestPath: "/does-not-exist", expectedStatus: http.StatusNotFound},
-		{name: "dashboard page", method: http.MethodGet, requestPath: "/dashboard", expectedStatus: http.StatusOK},
-		// {name: "dashboard asset", method: http.MethodGet, requestPath: "/dashboard/css/styles.css", expectedStatus: http.StatusOK},
-		{name: "metrics page", method: http.MethodGet, requestPath: "/metrics", expectedStatus: http.StatusOK},
 		{name: "metrics snapshot", method: http.MethodGet, requestPath: "/metrics.json", expectedStatus: http.StatusOK},
 		{name: "ingestion over get", method: http.MethodGet, requestPath: "/logs", expectedStatus: http.StatusMethodNotAllowed},
-		{name: "home page over post", method: http.MethodPost, requestPath: "/", expectedStatus: http.StatusMethodNotAllowed},
+		{name: "home page over post", method: http.MethodPost, requestPath: "/", expectedStatus: http.StatusNotFound},
 	}
 
 	for _, routeCase := range routeCases {
@@ -302,11 +286,11 @@ func TestServerApplication_StoresEveryAcceptedLogOrDeadLettersItWhenTheApplicati
 	t.Parallel()
 
 	applicationConfiguration := testApplicationConfiguration(t)
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{
+	applicationConfiguration.RoutingRules = map[string]string{
 		"claims":   "service1",
 		"payments": "service2",
 		"policy":   "service3",
-	})
+	}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	acceptedLogCount := 0
@@ -383,7 +367,7 @@ func TestServerApplication_DeadLettersTheLogsThePipelineCouldNotProcess(t *testi
 	t.Parallel()
 
 	applicationConfiguration := testApplicationConfiguration(t)
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service2"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service2"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	serverApplication.cancelPipelineWork()
@@ -407,5 +391,36 @@ func TestServerApplication_DeadLettersTheLogsThePipelineCouldNotProcess(t *testi
 	deadLetterEntryCount := countDeadLetterEntries(t, applicationConfiguration.DeadLetterFilePath)
 	if deadLetterEntryCount != len(undrainedLogs) {
 		t.Errorf("dead letter entry count = %d, want %d", deadLetterEntryCount, len(undrainedLogs))
+	}
+}
+
+func TestHTTPShutdownCancelsAndWaitsForMetricsStream(t *testing.T) {
+	configuration := testApplicationConfiguration(t)
+	registry := metrics.NewMetrics(time.Minute, nil)
+	var inFlight sync.WaitGroup
+	server := newHTTPServer(configuration, trackRunningRequests(buildRequestRouter(configuration, http.NotFoundHandler(), registry), &inFlight))
+	testServer := httptest.NewUnstartedServer(server.Handler)
+	testServer.Config = server.Server
+	testServer.Start()
+	defer testServer.Close()
+	response, err := testServer.Client().Get(testServer.URL + "/metrics/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if _, err := bufio.NewReader(response.Body).ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := shutdownHTTPServer(server, ctx); err != nil {
+		t.Fatalf("stream prevented graceful shutdown: %v", err)
+	}
+	completed := make(chan struct{})
+	go func() { inFlight.Wait(); close(completed) }()
+	select {
+	case <-completed:
+	case <-ctx.Done():
+		t.Fatal("stream remained tracked after shutdown")
 	}
 }

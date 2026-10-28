@@ -8,56 +8,58 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 const (
-	environmentNameHTTPPort                          = "HTTP_PORT"
-	environmentNameRateLimitPerSecond                = "RATE_LIMIT"
-	environmentNameRateLimitCleanupInterval          = "RATE_LIMIT_CLEANUP_INTERVAL"
-	environmentNameRawLogsBufferSize                 = "RAW_LOGS_BUFFER"
-	environmentNameConsumerBatchSize                 = "CONSUMER_BATCH_SIZE"
-	environmentNameChannelSendTimeout                = "CHANNEL_SEND_TIMEOUT"
-	environmentNameMaximumBodySizeInBytes            = "MAX_BODY_BYTES"
-	environmentNameApplicationEnvironment            = "APP_ENV"
-	environmentNameRoutingConfigurationFilePath      = "ROUTING_CONFIG_PATH"
-	environmentNameDefaultDestination                = "DEFAULT_DESTINATION"
-	environmentNameTrustedProxies                    = "TRUSTED_PROXIES"
-	environmentNameRabbitMQHost                      = "RABBITMQ_HOST"
-	environmentNameRabbitMQPort                      = "RABBITMQ_PORT"
-	environmentNameRabbitMQUsername                  = "RABBITMQ_USER"
-	environmentNameRabbitMQPassword                  = "RABBITMQ_PASS"
-	environmentNameRabbitMQManagementURL             = "RABBITMQ_MGMT_URL"
-	environmentNameRabbitMQVirtualHost               = "RABBITMQ_VHOST"
-	environmentNameRabbitMQUseTLS                    = "RABBITMQ_USE_TLS"
-	environmentNamePublishTimeout                    = "PUBLISH_TIMEOUT"
-	environmentNameRabbitMQReconnectBackoffDelayList = "RABBITMQ_RECONNECT_BACKOFFS"
-	environmentNamePipelineWorkerCount               = "PIPELINE_WORKER_COUNT"
-	environmentNameWriteBatchSize                    = "WRITE_BATCH_SIZE"
-	environmentNameWriteFlushInterval                = "WRITE_FLUSH_INTERVAL"
-	environmentNameDatabaseDirectoryPath             = "DB_DIR"
-	environmentNameDatabaseBusyTimeout               = "DB_BUSY_TIMEOUT"
-	environmentNameConfigurationFilePath             = "CONFIG_FILE_PATH"
-	environmentNameWriteRetryBackoffDelayList        = "RETRY_BACKOFFS"
-	environmentNameDeadLetterFilePath                = "DEAD_LETTER_PATH"
-	environmentNameDeadLetterMaximumFileSizeInBytes  = "DEAD_LETTER_MAX_BYTES"
-	environmentNameMetricsThroughputWindow           = "METRICS_THROUGHPUT_WINDOW"
-	environmentNameMetricsBacklogTimeout             = "METRICS_BACKLOG_TIMEOUT"
-	environmentNameShutdownGracePeriod               = "SHUTDOWN_GRACE_PERIOD"
+	environmentNameHTTPPort                         = "HTTP_PORT"
+	environmentNameRateLimitPerSecond               = "RATE_LIMIT"
+	environmentNameRateLimitCleanupIntervalSeconds  = "RATE_LIMIT_CLEANUP_INTERVAL_IN_SECONDS"
+	environmentNameRawLogsBufferSize                = "RAW_LOGS_BUFFER"
+	environmentNameConsumerBatchSize                = "CONSUMER_BATCH_SIZE"
+	environmentNameChannelSendTimeoutMillis         = "CHANNEL_SEND_TIMEOUT_IN_MILLISECONDS"
+	environmentNameMaximumBodySizeInBytes           = "MAX_BODY_BYTES"
+	environmentNameApplicationEnvironment           = "APP_ENV"
+	environmentNameRoutingRules                     = "ROUTING_RULES"
+	environmentNameDefaultDestination               = "DEFAULT_DESTINATION"
+	environmentNameTrustedProxies                   = "TRUSTED_PROXIES"
+	environmentNameRabbitMQHost                     = "RABBITMQ_HOST"
+	environmentNameRabbitMQPort                     = "RABBITMQ_PORT"
+	environmentNameRabbitMQUsername                 = "RABBITMQ_USER"
+	environmentNameRabbitMQPassword                 = "RABBITMQ_PASS"
+	environmentNameRabbitMQManagementURL            = "RABBITMQ_MGMT_URL"
+	environmentNameRabbitMQVirtualHost              = "RABBITMQ_VHOST"
+	environmentNameRabbitMQUseTLS                   = "RABBITMQ_USE_TLS"
+	environmentNamePublishTimeoutSeconds            = "PUBLISH_TIMEOUT_IN_SECONDS"
+	environmentNameRabbitMQReconnectBackoffSeconds  = "RABBITMQ_RECONNECT_BACKOFFS_IN_SECONDS"
+	environmentNamePipelineWorkerCount              = "PIPELINE_WORKER_COUNT"
+	environmentNameWriteBatchSize                   = "WRITE_BATCH_SIZE"
+	environmentNameWriteFlushIntervalSeconds        = "WRITE_FLUSH_INTERVAL_IN_SECONDS"
+	environmentNameDatabaseDirectoryPath            = "DB_DIR"
+	environmentNameDatabaseBusyTimeoutSeconds       = "DB_BUSY_TIMEOUT_IN_SECONDS"
+	environmentNameWriteRetryBackoffSeconds         = "RETRY_BACKOFFS_IN_SECONDS"
+	environmentNameDeadLetterFilePath               = "DEAD_LETTER_PATH"
+	environmentNameDeadLetterMaximumFileSizeInBytes = "DEAD_LETTER_MAX_BYTES"
+	environmentNameMetricsThroughputWindowSeconds   = "METRICS_THROUGHPUT_WINDOW_IN_SECONDS"
+	environmentNameMetricsBacklogTimeoutSeconds     = "METRICS_BACKLOG_TIMEOUT_IN_SECONDS"
+	environmentNameShutdownGracePeriodSeconds       = "SHUTDOWN_GRACE_PERIOD_IN_SECONDS"
+	environmentNameSpoolFilePath                    = "SPOOL_PATH"
+	environmentNameCorsAllowedOrigins               = "CORS_ALLOWED_ORIGINS"
 )
 
 const (
-	defaultHTTPPort                     = 8080
-	defaultRateLimitPerSecond           = 1000
-	defaultRateLimitCleanupInterval     = time.Minute
-	defaultRawLogsBufferSize            = 10000
-	defaultConsumerBatchSize            = 50
-	defaultChannelSendTimeout           = 100 * time.Millisecond
-	defaultMaximumBodySizeInBytes       = 1048576
-	defaultApplicationEnvironment       = "production"
-	defaultRoutingConfigurationFilePath = "configs/routing.json"
-	service1Destination                 = "service1"
-	defaultPublishTimeout               = 5 * time.Second
-	defaultRabbitMQUseTLS               = false
+	defaultHTTPPort                 = 8080
+	defaultRateLimitPerSecond       = 1000
+	defaultRateLimitCleanupInterval = time.Minute
+	defaultRawLogsBufferSize        = 10000
+	defaultConsumerBatchSize        = 50
+	defaultChannelSendTimeout       = 100 * time.Millisecond
+	defaultMaximumBodySizeInBytes   = 1048576
+	defaultApplicationEnvironment   = "production"
+	service1Destination             = "service1"
+	defaultPublishTimeout           = 5 * time.Second
+	defaultRabbitMQUseTLS           = false
 	// DefaultRabbitMQVirtualHost is the virtual host used when none is configured.
 	DefaultRabbitMQVirtualHost              = "/"
 	defaultPipelineWorkerCount              = 4
@@ -65,9 +67,9 @@ const (
 	defaultWriteFlushInterval               = time.Second
 	defaultDatabaseDirectoryPath            = "./data"
 	defaultDatabaseBusyTimeout              = 5 * time.Second
-	defaultConfigurationFilePath            = ".env"
 	defaultDeadLetterFilePath               = "logs-failed.json"
 	defaultDeadLetterMaximumFileSizeInBytes = 10485760
+	DefaultSpoolFilePath                    = "ingestion-spool.log"
 	defaultMetricsThroughputWindow          = time.Minute
 	defaultMetricsBacklogTimeout            = 2 * time.Second
 	defaultShutdownGracePeriod              = 30 * time.Second
@@ -103,7 +105,7 @@ type ApplicationConfiguration struct {
 	ChannelSendTimeout               time.Duration
 	MaximumBodySizeInBytes           int
 	ApplicationEnvironment           string
-	RoutingConfigurationFilePath     string
+	RoutingRules                     map[string]string
 	DefaultDestination               string
 	TrustedProxies                   []string
 	RabbitMQHost                     string
@@ -123,24 +125,27 @@ type ApplicationConfiguration struct {
 	WriteRetryBackoffDelays          []time.Duration
 	DeadLetterFilePath               string
 	DeadLetterMaximumFileSizeInBytes int
+	SpoolFilePath                    string
+	CorsAllowedOrigins               []string
 	MetricsThroughputWindow          time.Duration
 	MetricsBacklogTimeout            time.Duration
 	ShutdownGracePeriod              time.Duration
 }
 
-// Builds the application configuration from the merged process environment and configuration file, returning an error naming the first invalid setting.
+// Builds the application configuration from optional .env values overridden by the process environment.
 func NewApplicationConfiguration() (ApplicationConfiguration, error) {
-	environmentVariables := mapFromOSEnviron(os.Environ())
-	configurationFilePath := environmentVariables[environmentNameConfigurationFilePath]
-	if configurationFilePath == "" {
-		configurationFilePath = defaultConfigurationFilePath
+	environmentVariables, fileError := godotenv.Read(".env")
+	if fileError != nil && !errors.Is(fileError, os.ErrNotExist) {
+		return ApplicationConfiguration{}, fmt.Errorf("loading .env: %w", fileError)
 	}
-	configurationFileSettings, configurationFileError := readOptionalConfigurationFile(configurationFilePath)
-	if configurationFileError != nil {
-		return ApplicationConfiguration{}, configurationFileError
+	if environmentVariables == nil {
+		environmentVariables = make(map[string]string)
 	}
-	mergedSettings := mergedEnvironmentWithFileSettings(environmentVariables, configurationFileSettings)
-	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(mergedSettings)
+	for _, variable := range os.Environ() {
+		name, value, _ := strings.Cut(variable, "=")
+		environmentVariables[name] = value
+	}
+	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 	if configurationError != nil {
 		return ApplicationConfiguration{}, configurationError
 	}
@@ -163,7 +168,7 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.RateLimitPerSecond = rateLimitPerSecond
 
-	rateLimitCleanupInterval, rateLimitCleanupIntervalError := parsePositiveDurationSetting(environmentVariables, environmentNameRateLimitCleanupInterval, defaultRateLimitCleanupInterval)
+	rateLimitCleanupInterval, rateLimitCleanupIntervalError := parsePositiveDurationFromSeconds(environmentVariables, environmentNameRateLimitCleanupIntervalSeconds, defaultRateLimitCleanupInterval)
 	if rateLimitCleanupIntervalError != nil {
 		return ApplicationConfiguration{}, rateLimitCleanupIntervalError
 	}
@@ -181,7 +186,7 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.ConsumerBatchSize = consumerBatchSize
 
-	channelSendTimeout, channelSendTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNameChannelSendTimeout, defaultChannelSendTimeout)
+	channelSendTimeout, channelSendTimeoutError := parsePositiveDurationFromMilliseconds(environmentVariables, environmentNameChannelSendTimeoutMillis, defaultChannelSendTimeout)
 	if channelSendTimeoutError != nil {
 		return ApplicationConfiguration{}, channelSendTimeoutError
 	}
@@ -199,11 +204,11 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.ApplicationEnvironment = applicationEnvironment
 
-	routingConfigurationFilePath, routingConfigurationFilePathError := parseStringSetting(environmentVariables, environmentNameRoutingConfigurationFilePath, defaultRoutingConfigurationFilePath)
-	if routingConfigurationFilePathError != nil {
-		return ApplicationConfiguration{}, routingConfigurationFilePathError
+	routingRules, routingRulesError := parseRoutingRulesSetting(environmentVariables, environmentNameRoutingRules)
+	if routingRulesError != nil {
+		return ApplicationConfiguration{}, routingRulesError
 	}
-	applicationConfiguration.RoutingConfigurationFilePath = routingConfigurationFilePath
+	applicationConfiguration.RoutingRules = routingRules
 
 	defaultDestination, defaultDestinationError := parseStringSetting(environmentVariables, environmentNameDefaultDestination, service1Destination)
 	if defaultDestinationError != nil {
@@ -259,13 +264,13 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.RabbitMQUseTLS = rabbitMQUseTLS
 
-	publishTimeout, publishTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNamePublishTimeout, defaultPublishTimeout)
+	publishTimeout, publishTimeoutError := parsePositiveDurationFromSeconds(environmentVariables, environmentNamePublishTimeoutSeconds, defaultPublishTimeout)
 	if publishTimeoutError != nil {
 		return ApplicationConfiguration{}, publishTimeoutError
 	}
 	applicationConfiguration.PublishTimeout = publishTimeout
 
-	rabbitMQReconnectBackoffDelays, rabbitMQReconnectBackoffDelayListError := parsePositiveDurationListSetting(environmentVariables, environmentNameRabbitMQReconnectBackoffDelayList, defaultRabbitMQReconnectBackoffDelays)
+	rabbitMQReconnectBackoffDelays, rabbitMQReconnectBackoffDelayListError := parsePositiveDurationListFromSeconds(environmentVariables, environmentNameRabbitMQReconnectBackoffSeconds, defaultRabbitMQReconnectBackoffDelays)
 	if rabbitMQReconnectBackoffDelayListError != nil {
 		return ApplicationConfiguration{}, rabbitMQReconnectBackoffDelayListError
 	}
@@ -283,7 +288,7 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.WriteBatchSize = writeBatchSize
 
-	writeFlushInterval, writeFlushIntervalError := parsePositiveDurationSetting(environmentVariables, environmentNameWriteFlushInterval, defaultWriteFlushInterval)
+	writeFlushInterval, writeFlushIntervalError := parsePositiveDurationFromSeconds(environmentVariables, environmentNameWriteFlushIntervalSeconds, defaultWriteFlushInterval)
 	if writeFlushIntervalError != nil {
 		return ApplicationConfiguration{}, writeFlushIntervalError
 	}
@@ -295,13 +300,13 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.DatabaseDirectoryPath = databaseDirectoryPath
 
-	databaseBusyTimeout, databaseBusyTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNameDatabaseBusyTimeout, defaultDatabaseBusyTimeout)
+	databaseBusyTimeout, databaseBusyTimeoutError := parsePositiveDurationFromSeconds(environmentVariables, environmentNameDatabaseBusyTimeoutSeconds, defaultDatabaseBusyTimeout)
 	if databaseBusyTimeoutError != nil {
 		return ApplicationConfiguration{}, databaseBusyTimeoutError
 	}
 	applicationConfiguration.DatabaseBusyTimeout = databaseBusyTimeout
 
-	writeRetryBackoffDelays, writeRetryBackoffDelayListError := parsePositiveDurationListSetting(environmentVariables, environmentNameWriteRetryBackoffDelayList, defaultWriteRetryBackoffDelays)
+	writeRetryBackoffDelays, writeRetryBackoffDelayListError := parsePositiveDurationListFromSeconds(environmentVariables, environmentNameWriteRetryBackoffSeconds, defaultWriteRetryBackoffDelays)
 	if writeRetryBackoffDelayListError != nil {
 		return ApplicationConfiguration{}, writeRetryBackoffDelayListError
 	}
@@ -319,19 +324,31 @@ func newApplicationConfigurationFromEnvironment(environmentVariables map[string]
 	}
 	applicationConfiguration.DeadLetterMaximumFileSizeInBytes = deadLetterMaximumFileSizeInBytes
 
-	metricsThroughputWindow, metricsThroughputWindowError := parsePositiveDurationSetting(environmentVariables, environmentNameMetricsThroughputWindow, defaultMetricsThroughputWindow)
+	spoolFilePath, spoolFilePathError := parseStringSetting(environmentVariables, environmentNameSpoolFilePath, DefaultSpoolFilePath)
+	if spoolFilePathError != nil {
+		return ApplicationConfiguration{}, spoolFilePathError
+	}
+	applicationConfiguration.SpoolFilePath = spoolFilePath
+
+	corsAllowedOrigins, corsAllowedOriginsError := parseStringListSetting(environmentVariables, environmentNameCorsAllowedOrigins, nil)
+	if corsAllowedOriginsError != nil {
+		return ApplicationConfiguration{}, corsAllowedOriginsError
+	}
+	applicationConfiguration.CorsAllowedOrigins = corsAllowedOrigins
+
+	metricsThroughputWindow, metricsThroughputWindowError := parsePositiveDurationFromSeconds(environmentVariables, environmentNameMetricsThroughputWindowSeconds, defaultMetricsThroughputWindow)
 	if metricsThroughputWindowError != nil {
 		return ApplicationConfiguration{}, metricsThroughputWindowError
 	}
 	applicationConfiguration.MetricsThroughputWindow = metricsThroughputWindow
 
-	metricsBacklogTimeout, metricsBacklogTimeoutError := parsePositiveDurationSetting(environmentVariables, environmentNameMetricsBacklogTimeout, defaultMetricsBacklogTimeout)
+	metricsBacklogTimeout, metricsBacklogTimeoutError := parsePositiveDurationFromSeconds(environmentVariables, environmentNameMetricsBacklogTimeoutSeconds, defaultMetricsBacklogTimeout)
 	if metricsBacklogTimeoutError != nil {
 		return ApplicationConfiguration{}, metricsBacklogTimeoutError
 	}
 	applicationConfiguration.MetricsBacklogTimeout = metricsBacklogTimeout
 
-	shutdownGracePeriod, shutdownGracePeriodError := parsePositiveDurationSetting(environmentVariables, environmentNameShutdownGracePeriod, defaultShutdownGracePeriod)
+	shutdownGracePeriod, shutdownGracePeriodError := parsePositiveDurationFromSeconds(environmentVariables, environmentNameShutdownGracePeriodSeconds, defaultShutdownGracePeriod)
 	if shutdownGracePeriodError != nil {
 		return ApplicationConfiguration{}, shutdownGracePeriodError
 	}
@@ -391,49 +408,6 @@ func parsePositiveIntegerSetting(environmentVariables map[string]string, setting
 	return parsedSettingValue, nil
 }
 
-// Returns the duration for the setting, falling back to the default when empty and rejecting non-positive values.
-func parsePositiveDurationSetting(environmentVariables map[string]string, settingName string, defaultValue time.Duration) (time.Duration, error) {
-	rawSettingValue := environmentVariables[settingName]
-	if rawSettingValue == "" {
-		return defaultValue, nil
-	}
-
-	parsedSettingValue, parsingError := time.ParseDuration(rawSettingValue)
-	if parsingError != nil {
-		return 0, fmt.Errorf("environment variable %s has value %q, which is not a valid duration: %w", settingName, rawSettingValue, parsingError)
-	}
-
-	if parsedSettingValue <= 0 {
-		return 0, fmt.Errorf("environment variable %s must be a positive duration, but shows %q", settingName, rawSettingValue)
-	}
-	return parsedSettingValue, nil
-}
-
-// Returns the comma-separated durations for the setting, falling back to the default when empty and rejecting non-positive entries.
-func parsePositiveDurationListSetting(environmentVariables map[string]string, settingName string, defaultValue []time.Duration) ([]time.Duration, error) {
-	rawSettingValue := environmentVariables[settingName]
-	if rawSettingValue == "" {
-		return defaultValue, nil
-	}
-
-	rawSettingValues := strings.Split(rawSettingValue, ",")
-	parsedSettingValues := make([]time.Duration, 0, len(rawSettingValues))
-	for _, rawSettingEntry := range rawSettingValues {
-		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
-		parsedSettingEntry, parsingError := time.ParseDuration(trimmedSettingEntry)
-		if parsingError != nil {
-			return nil, fmt.Errorf("environment variable %s contains value %q, which is not a valid duration: %w", settingName, trimmedSettingEntry, parsingError)
-		}
-
-		if parsedSettingEntry <= 0 {
-			return nil, fmt.Errorf("environment variable %s must contain only positive durations, but includes %q", settingName, trimmedSettingEntry)
-		}
-
-		parsedSettingValues = append(parsedSettingValues, parsedSettingEntry)
-	}
-	return parsedSettingValues, nil
-}
-
 // Returns the string for the setting and an error naming the variable when it is missing or empty.
 func parseRequiredStringSetting(environmentVariables map[string]string, settingName string) (string, error) {
 	settingValue := environmentVariables[settingName]
@@ -450,14 +424,33 @@ func parseCIDRListSetting(environmentVariables map[string]string, settingName st
 		return nil, nil
 	}
 
-	rawSettingValues := strings.Split(rawSettingValue, ",")
-	parsedSettingValues := make([]string, 0, len(rawSettingValues))
-	for _, rawSettingEntry := range rawSettingValues {
+	parsedSettingValues := make([]string, 0)
+	for rawSettingEntry := range strings.SplitSeq(rawSettingValue, ",") {
 		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
+		if trimmedSettingEntry == "" {
+			continue
+		}
 		if _, parseError := netip.ParsePrefix(trimmedSettingEntry); parseError != nil {
 			return nil, fmt.Errorf("environment variable %s contains value %q, which is not a valid CIDR prefix: %w", settingName, trimmedSettingEntry, parseError)
 		}
 		parsedSettingValues = append(parsedSettingValues, trimmedSettingEntry)
+	}
+	return parsedSettingValues, nil
+}
+
+// Returns the comma-separated strings for the setting, falling back to the default when empty.
+func parseStringListSetting(environmentVariables map[string]string, settingName string, defaultValue []string) ([]string, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return defaultValue, nil
+	}
+
+	parsedSettingValues := make([]string, 0)
+	for rawSettingEntry := range strings.SplitSeq(rawSettingValue, ",") {
+		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
+		if trimmedSettingEntry != "" {
+			parsedSettingValues = append(parsedSettingValues, trimmedSettingEntry)
+		}
 	}
 	return parsedSettingValues, nil
 }
@@ -484,4 +477,88 @@ func parseBooleanSetting(environmentVariables map[string]string, settingName str
 	}
 
 	return parsedSettingValue, nil
+}
+
+// Returns the duration for the setting, interpreted as seconds, falling back to the default when empty.
+func parsePositiveDurationFromSeconds(environmentVariables map[string]string, settingName string, defaultValue time.Duration) (time.Duration, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return defaultValue, nil
+	}
+	seconds, err := strconv.Atoi(rawSettingValue)
+	if err != nil {
+		return 0, fmt.Errorf("environment variable %s has value %q, which is not a valid integer: %w", settingName, rawSettingValue, err)
+	}
+	if seconds <= 0 {
+		return 0, fmt.Errorf("environment variable %s must be a positive integer, but shows %d", settingName, seconds)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+// Returns the duration for the setting, interpreted as milliseconds, falling back to the default when empty.
+func parsePositiveDurationFromMilliseconds(environmentVariables map[string]string, settingName string, defaultValue time.Duration) (time.Duration, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return defaultValue, nil
+	}
+	millis, err := strconv.Atoi(rawSettingValue)
+	if err != nil {
+		return 0, fmt.Errorf("environment variable %s has value %q, which is not a valid integer: %w", settingName, rawSettingValue, err)
+	}
+	if millis <= 0 {
+		return 0, fmt.Errorf("environment variable %s must be a positive integer, but shows %d", settingName, millis)
+	}
+	return time.Duration(millis) * time.Millisecond, nil
+}
+
+// Returns the comma-separated durations for the setting, interpreted as seconds, falling back to the default when empty.
+func parsePositiveDurationListFromSeconds(environmentVariables map[string]string, settingName string, defaultValue []time.Duration) ([]time.Duration, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return defaultValue, nil
+	}
+	parsedSettingValues := make([]time.Duration, 0)
+	for rawSettingEntry := range strings.SplitSeq(rawSettingValue, ",") {
+		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
+		if trimmedSettingEntry == "" {
+			continue
+		}
+		seconds, parsingError := strconv.Atoi(trimmedSettingEntry)
+		if parsingError != nil {
+			return nil, fmt.Errorf("environment variable %s contains value %q, which is not a valid integer: %w", settingName, trimmedSettingEntry, parsingError)
+		}
+		if seconds <= 0 {
+			return nil, fmt.Errorf("environment variable %s must contain only positive integers, but includes %q", settingName, trimmedSettingEntry)
+		}
+		parsedSettingValues = append(parsedSettingValues, time.Duration(seconds)*time.Second)
+	}
+	return parsedSettingValues, nil
+}
+
+// Parses comma-separated key=value routing rules.
+func parseRoutingRulesSetting(environmentVariables map[string]string, settingName string) (map[string]string, error) {
+	rawSettingValue := environmentVariables[settingName]
+	if rawSettingValue == "" {
+		return map[string]string{}, nil
+	}
+	rules := make(map[string]string)
+	for pair := range strings.SplitSeq(rawSettingValue, ",") {
+		trimmed := strings.TrimSpace(pair)
+		if trimmed == "" {
+			continue
+		}
+
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("environment variable %s contains invalid rule %q, expected key=value", settingName, trimmed)
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if key == "" || value == "" {
+			return nil, fmt.Errorf("environment variable %s contains empty key or value in rule %q", settingName, trimmed)
+		}
+		rules[key] = value
+	}
+	return rules, nil
 }

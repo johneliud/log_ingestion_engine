@@ -34,6 +34,17 @@ jobs:
         with:
           go-version: '1.26.3'
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
       - name: Check the broker credentials
         id: broker-credentials
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -61,3 +72,7 @@ jobs:
           RABBITMQ_PORT: '5672'
           CI_REQUIRE_BROKER_TESTS: ${{ steps.broker-credentials.outputs.requireBrokerTests == 'true' && '1' || '0' }}
         run: go test ./... -race
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend

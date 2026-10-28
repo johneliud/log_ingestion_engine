@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/johneliud/log_ingestion_engine/internal/queue/consumer"
 	"github.com/johneliud/log_ingestion_engine/internal/ratelimit"
 	"github.com/johneliud/log_ingestion_engine/internal/router"
+	"github.com/johneliud/log_ingestion_engine/internal/spool"
 	"github.com/johneliud/log_ingestion_engine/internal/storage"
 )
 
@@ -47,6 +50,7 @@ type serverApplication struct {
 	sqliteLogStore        *storage.SQLiteLogStore
 	publisher             *queue.Publisher
 	rawLogsQueue          *pipeline.RawLogsQueue
+	ingestionSpool        *spool.Spool
 	logEnricher           *enrich.LogEnricher
 	serviceRouter         *router.ServiceRouter
 	defaultDestination    model.Destination
@@ -105,27 +109,50 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	rawLogsQueue := pipeline.NewRawLogsQueue(applicationConfiguration.RawLogsBufferSize, applicationConfiguration.ChannelSendTimeout)
 
+	spoolFilePath := applicationConfiguration.SpoolFilePath
+	if spoolFilePath == "" {
+		spoolFilePath = filepath.Join(filepath.Dir(applicationConfiguration.DatabaseDirectoryPath), config.DefaultSpoolFilePath)
+	}
+	ingestionSpool, spoolError := spool.NewSpool(spoolFilePath)
+	if spoolError != nil {
+		cancelPipelineWork()
+		cancelStorageWork()
+		return nil, fmt.Errorf("creating ingestion spool %q: %w", spoolFilePath, spoolError)
+	}
+
 	logEnricher := enrich.NewLogEnricher(applicationConfiguration.ApplicationEnvironment, nil)
 
-	serviceRouter, routerError := router.NewServiceRouter(applicationConfiguration.RoutingConfigurationFilePath, applicationConfiguration.DefaultDestination)
+	serviceRouter, routerError := router.NewServiceRouter(applicationConfiguration.RoutingRules, applicationConfiguration.DefaultDestination)
 	if routerError != nil {
 		cancelPipelineWork()
 		cancelStorageWork()
 		return nil, routerError
 	}
 
-	publisher := queue.NewPublisher(applicationConfiguration, applicationConfiguration.RawLogsBufferSize, queue.WithPublishedMessageRecorder(metricsRegistry))
+	publisher := queue.NewPublisher(
+		applicationConfiguration,
+		applicationConfiguration.RawLogsBufferSize,
+		queue.WithPublishedMessageRecorder(metricsRegistry),
+		queue.WithPublishSessionCount(applicationConfiguration.PipelineWorkerCount),
+	)
 
 	deadLetterWriter := storage.NewDeadLetterWriter(applicationConfiguration)
 
+	consumerDeadLetterSink := func(entry model.DeadLetterEntry) error {
+		if err := deadLetterWriter.Submit(entry); err != nil {
+			return err
+		}
+		return ingestionSpool.Ack(entry.Log.LogID)
+	}
+
 	batchConsumer := pipeline.NewBatchConsumer(pipeline.BatchConsumerDependencies{
-		RawLogsChannel:     rawLogsQueue.RawLogsChannel(),
+		RawLogsQueue:       rawLogsQueue,
 		ConsumerBatchSize:  applicationConfiguration.ConsumerBatchSize,
 		WorkerCount:        applicationConfiguration.PipelineWorkerCount,
 		Enricher:           logEnricher,
 		Router:             serviceRouter,
 		QueuePublisher:     publisher,
-		DeadLetterSink:     deadLetterWriter.Submit,
+		DeadLetterSink:     consumerDeadLetterSink,
 		DefaultDestination: model.Destination(applicationConfiguration.DefaultDestination),
 	})
 
@@ -143,6 +170,7 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		StoreBatch:         sqliteLogStore.StoreBatch,
 		DeadLetterSink:     deadLetterWriter.Submit,
 		MetricsRecorder:    metricsRegistry,
+		Spool:              ingestionSpool,
 	})
 
 	rateLimiter := ratelimit.NewPerIPRateLimiterRegistry(
@@ -154,6 +182,7 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 	ingestionHandler := handler.NewLogIngestionHandler(
 		applicationConfiguration.MaximumBodySizeInBytes,
 		handler.WithRawLogPusher(rawLogsQueue),
+		handler.WithSpool(ingestionSpool),
 		handler.WithTrustedProxies(applicationConfiguration.TrustedProxies),
 		handler.WithIngestionMetricsRecorder(metricsRegistry),
 	)
@@ -184,7 +213,16 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	flushTrigger, flushTriggerCompletion := startFlushTrigger(storageContext, applicationConfiguration.WriteFlushInterval)
 
+	deadLetterCompletion := deadLetterWriter.Run()
+
+	// Start the pipeline before replaying the spool so replayed logs drain as they are pushed; replaying into a queue with no consumers would fill it and drop every log beyond its capacity.
 	pipelineCompletion := batchConsumer.Start(pipelineContext)
+
+	unackedSpooledLogs, replayError := ingestionSpool.Unacked()
+	if replayError != nil {
+		slog.Error("replaying spooled logs failed", "error", replayError)
+	}
+
 	backgroundCompletions := []backgroundWork{
 		{name: "the publisher reconnect loop", completion: publisher.RunReconnectLoop(storageContext)},
 		{name: "the batch writer", completion: batchWriter.Run(storageContext, flushTrigger)},
@@ -193,7 +231,12 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		{name: "the flush trigger", completion: flushTriggerCompletion},
 		{name: "the rate limiter idle cleanup", completion: rateLimiter.StartIdleCleanup(storageContext, applicationConfiguration.RateLimitCleanupInterval)},
 	}
-	deadLetterCompletion := deadLetterWriter.Run()
+	replayCompletion := make(chan struct{})
+	go func() {
+		defer close(replayCompletion)
+		replaySpooledLogs(rawLogsQueue, unackedSpooledLogs, applicationConfiguration.ConsumerBatchSize, pipelineContext)
+	}()
+	backgroundCompletions = append(backgroundCompletions, backgroundWork{name: "the spool replay", completion: replayCompletion})
 
 	return &serverApplication{
 		requestRouter:         trackedRequestRouter,
@@ -208,6 +251,7 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 		sqliteLogStore:        sqliteLogStore,
 		publisher:             publisher,
 		rawLogsQueue:          rawLogsQueue,
+		ingestionSpool:        ingestionSpool,
 		logEnricher:           logEnricher,
 		serviceRouter:         serviceRouter,
 		defaultDestination:    model.Destination(applicationConfiguration.DefaultDestination),
@@ -224,16 +268,26 @@ func trackRunningRequests(next http.Handler, runningRequests *sync.WaitGroup) ht
 	})
 }
 
-// Builds the request router with the ingestion, metrics, dashboard and home page routes wired.
+// Replays the spooled logs into the pipeline. The logs were already accepted from their clients, so the replay waits for the pipeline to free capacity instead of dropping them.
+func replaySpooledLogs(rawLogsQueue *pipeline.RawLogsQueue, spooledLogs []model.RawLog, chunkSize int, applicationContext context.Context) {
+	if chunkSize <= 0 {
+		chunkSize = 1
+	}
+	for chunkStart := 0; chunkStart < len(spooledLogs); chunkStart += chunkSize {
+		chunkEnd := min(chunkStart+chunkSize, len(spooledLogs))
+		if pushError := rawLogsQueue.PushBatchWhenCapacityFrees(applicationContext, spooledLogs[chunkStart:chunkEnd]); pushError != nil {
+			slog.Error("replaying spooled logs into the pipeline failed", "error", pushError, "chunk_start", chunkStart, "chunk_end", chunkEnd)
+			return
+		}
+	}
+}
+
+// Builds the request router with the ingestion and metrics API routes wired.
 func buildRequestRouter(applicationConfiguration config.ApplicationConfiguration, ingestionHandler http.Handler, metricsRegistry *metrics.Metrics) *http.ServeMux {
 	requestRouter := http.NewServeMux()
 	requestRouter.Handle("POST /logs", ingestionHandler)
-	requestRouter.HandleFunc("GET /metrics", handler.MetricsPageEndpointHandler())
 	requestRouter.HandleFunc("GET /metrics.json", handler.NewMetricsHandler(metricsRegistry, applicationConfiguration))
-	dashboardHandler := handler.NewDashboardHandler()
-	requestRouter.HandleFunc("GET /dashboard", dashboardHandler)
-	requestRouter.HandleFunc("GET /dashboard/", dashboardHandler)
-	requestRouter.HandleFunc("GET /{$}", handler.RootEndpointHandler())
+	requestRouter.HandleFunc("GET /metrics/events", handler.NewMetricsEventsHandler(metricsRegistry, applicationConfiguration))
 	return requestRouter
 }
 
@@ -257,16 +311,27 @@ func logConfigurationSummary(applicationConfiguration config.ApplicationConfigur
 	)
 }
 
+// Owns the HTTP server and the cancellation shared by its request contexts.
+type applicationHTTPServer struct {
+	*http.Server
+	cancelRequests context.CancelFunc
+}
+
 // Builds the HTTP server that serves the wired request router.
-func newHTTPServer(applicationConfiguration config.ApplicationConfiguration, requestRouter http.Handler) *http.Server {
-	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", applicationConfiguration.HTTPPort),
-		Handler: requestRouter,
+func newHTTPServer(applicationConfiguration config.ApplicationConfiguration, requestRouter http.Handler) *applicationHTTPServer {
+	requestContext, cancelRequests := context.WithCancel(context.Background())
+	return &applicationHTTPServer{
+		Server: &http.Server{
+			Addr:        fmt.Sprintf(":%d", applicationConfiguration.HTTPPort),
+			Handler:     requestRouter,
+			BaseContext: func(net.Listener) context.Context { return requestContext },
+		},
+		cancelRequests: cancelRequests,
 	}
 }
 
 // Starts the HTTP server in the background and returns the channel that reports the listen error.
-func startHTTPServer(httpServer *http.Server) <-chan error {
+func startHTTPServer(httpServer *applicationHTTPServer) <-chan error {
 	serverListenErrorChannel := make(chan error, 1)
 	go func() {
 		serverListenErrorChannel <- httpServer.ListenAndServe()
@@ -288,7 +353,8 @@ func waitForTheServerToStop(applicationContext context.Context, serverListenErro
 }
 
 // Stops accepting requests, closes the connections that outlast the deadline and reports the shutdown failure.
-func shutdownHTTPServer(httpServer *http.Server, shutdownContext context.Context) error {
+func shutdownHTTPServer(httpServer *applicationHTTPServer, shutdownContext context.Context) error {
+	httpServer.cancelRequests()
 	shutdownError := httpServer.Shutdown(shutdownContext)
 	if shutdownError == nil {
 		return nil
@@ -324,8 +390,9 @@ func (application *serverApplication) stopBackgroundWork(shutdownContext context
 	flushError := application.batchWriter.FlushAll()
 	storeError := application.sqliteLogStore.Close()
 	deadLetterError := application.deadLetterWriter.Close()
+	spoolCloseError := application.ingestionSpool.Close()
 	deadLetterWaitError := application.waitForDeadLetterWriter(shutdownContext)
-	return errors.Join(runningRequestsError, pipelineError, publisherError, undrainedLogsError, waitError, flushError, storeError, deadLetterError, deadLetterWaitError)
+	return errors.Join(runningRequestsError, pipelineError, publisherError, undrainedLogsError, waitError, flushError, storeError, deadLetterError, deadLetterWaitError, spoolCloseError)
 }
 
 // Waits for the running requests to finish so no producer pushes into the raw logs after the drain.
@@ -382,6 +449,8 @@ func (application *serverApplication) deadLetterRemainingRawLogs() error {
 		if submitError := application.deadLetterWriter.Submit(deadLetterEntry); submitError != nil {
 			slog.Error("writing the dead letter entry failed", "error", submitError, "batch_id", rawLog.BatchID)
 			deadLetterError = errors.Join(deadLetterError, submitError)
+		} else if application.ingestionSpool != nil {
+			deadLetterError = errors.Join(deadLetterError, application.ingestionSpool.Ack(rawLog.LogID))
 		}
 	}
 	return deadLetterError

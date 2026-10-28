@@ -18,7 +18,7 @@ Run the full suite with the race detector (the same command CI uses):
 go test ./... -race
 ```
 
-All 152 tests across 14 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
+All 148 tests across 15 packages should pass. No broker, database files or environment variables are required for unit tests. The integration tests in `cmd/server` skip themselves when the broker is unavailable.
 
 ## Static checks before committing
 
@@ -36,8 +36,9 @@ These are the exact gates in `.github/workflows/ci.yml`.
 |---------|---------------|
 | `internal/config` | Environment parsing, file loading, validation, defaults |
 | `internal/enrich` | Enrichment fields, microsecond timestamp format, IP fallback |
-| `internal/handler` | HTTP handlers: log ingestion, metrics snapshot, root/home page, management-API backlog, dashboard page and assets |
+| `internal/handler` | HTTP handlers: log ingestion and JSON metrics snapshot (`POST /logs`, `GET /metrics.json`) |
 | `internal/ingest` | Log validation and client IP resolution |
+| `internal/spool` | Durable write-ahead spool: append+fsync before `202`, ack after storage/dead-letter, unacked replay on startup, compaction |
 | `cmd/server` | Composition root: route registration, exact home path and 404/405 behaviour, ingestion through the fallback into SQLite, rate limiting, the metrics counters, the graceful shutdown drain, the wait for the running requests and the dead-letter recovery of the logs the pipeline could not process. The integration suite in `cmd/server/integration_test.go` covers the full pipeline, the broker outage fallback, the SQLite batching triggers, the retries with the dead-letter contents and rotation, and the graceful shutdown with a real broker |
 | `internal/model` | Contract tests for log levels and destinations |
 | `internal/metrics` | Snapshot counters, error rate, throughput window, fallback backlog counter |
@@ -142,6 +143,89 @@ go run ./cmd/server
 curl -s -X POST http://localhost:8080/logs \
   -H 'Content-Type: application/json' \
   -d '[{"timestamp":"2026-10-26T12:00:00Z","service":"claims","level":"INFO","message":"test"}]'
+```
+
+### Manual verification with curl
+
+Start the server (`go run ./cmd/server`) with RabbitMQ running, then run each test below.
+
+#### Test 1 — Valid batch ingestion (expect `202 Accepted`)
+
+```bash
+curl -s -i -X POST localhost:8080/logs \
+  -H 'Content-Type: application/json' \
+  -d '[{"timestamp":"2026-10-28T10:00:00Z","service":"claims","level":"INFO","message":"test log 1"},{"timestamp":"2026-10-28T10:00:01Z","service":"billing","level":"ERROR","message":"test error"}]'
+```
+
+#### Test 2 — Partial batch (some valid, some invalid) (expect `202 Accepted` with `rejected` array)
+
+```bash
+curl -s -i -X POST localhost:8080/logs \
+  -H 'Content-Type: application/json' \
+  -d '[{"timestamp":"2026-10-28T10:00:00Z","service":"claims","level":"INFO","message":"valid"},{"timestamp":"not-a-time","service":"billing","level":"ERROR","message":"bad timestamp"}]'
+```
+
+#### Test 3 — All entries invalid (expect `400 Bad Request`)
+
+```bash
+curl -s -i -X POST localhost:8080/logs \
+  -H 'Content-Type: application/json' \
+  -d '[{"timestamp":"bad","service":"x","level":"BAD","message":""},{"timestamp":"also bad","service":"y","level":"WORSE","message":""}]'
+```
+
+#### Test 4 — Wrong content type (expect `415 Unsupported Media Type`)
+
+```bash
+curl -s -i -X POST localhost:8080/logs -H 'Content-Type: text/plain' -d 'hello'
+```
+
+#### Test 5 — Read metrics snapshot
+
+```bash
+curl -s localhost:8080/metrics.json | python3 -m json.tool
+```
+
+#### Test 6 — Server-sent events stream
+
+```bash
+timeout 3 curl -N -s localhost:8080/metrics/events
+```
+
+#### Test 7 — Rate limiting (rapid requests)
+
+Stop the running server, then start it with a lower request limit:
+
+```bash
+RATE_LIMIT=2 go run ./cmd/server
+```
+
+In another terminal, send requests rapidly. A request exceeding two requests per second from the same IP should return `429 Too Many Requests` (the limiter replenishes over time):
+
+```bash
+for i in $(seq 1 5); do
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST localhost:8080/logs -H 'Content-Type: application/json' -d '[{"timestamp":"2026-10-28T10:00:00Z","service":"test","level":"INFO","message":"rate test"}]')
+  echo "Request $i: $code"
+done
+curl -s localhost:8080/metrics.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Rate limited: {d[\"rate_limited_requests\"]}, Total: {d[\"total_logs_received\"]}')"
+```
+
+#### Test 8 — Verify SQLite storage
+
+```bash
+sqlite3 data/logs_service1.db "SELECT service, level, COUNT(*) FROM logs GROUP BY service, level ORDER BY service, level;"
+```
+
+#### Test 9 — Spool file durability
+
+```bash
+ls -la logs/ingestion-spool.log logs/ingestion-spool.log.acked
+```
+
+#### Test 10 — Graceful shutdown
+
+```bash
+kill -TERM <server-pid>
+# Watch the server log for "shutdown complete"
 ```
 
 To stop:

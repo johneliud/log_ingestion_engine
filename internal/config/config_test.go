@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -57,8 +58,8 @@ func TestNewApplicationConfigurationFromEnvironment_AppliesDefaultsForMissingSet
 		t.Errorf("ApplicationEnvironment = %q, want %q", applicationConfiguration.ApplicationEnvironment, defaultApplicationEnvironment)
 	}
 
-	if applicationConfiguration.RoutingConfigurationFilePath != defaultRoutingConfigurationFilePath {
-		t.Errorf("RoutingConfigurationFilePath = %q, want %q", applicationConfiguration.RoutingConfigurationFilePath, defaultRoutingConfigurationFilePath)
+	if len(applicationConfiguration.RoutingRules) != 0 {
+		t.Errorf("RoutingRules = %v, want empty", applicationConfiguration.RoutingRules)
 	}
 
 	if applicationConfiguration.DefaultDestination != service1Destination {
@@ -147,30 +148,30 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 	environmentVariables := aValidMinimalEnvironment(t)
 	environmentVariables[environmentNameHTTPPort] = "9443"
 	environmentVariables[environmentNameRateLimitPerSecond] = "250"
-	environmentVariables[environmentNameRateLimitCleanupInterval] = "2m"
+	environmentVariables[environmentNameRateLimitCleanupIntervalSeconds] = "120"
 	environmentVariables[environmentNameRawLogsBufferSize] = "500"
 	environmentVariables[environmentNameConsumerBatchSize] = "25"
-	environmentVariables[environmentNameChannelSendTimeout] = "250ms"
+	environmentVariables[environmentNameChannelSendTimeoutMillis] = "250"
 	environmentVariables[environmentNameMaximumBodySizeInBytes] = "2048"
 	environmentVariables[environmentNameApplicationEnvironment] = "staging"
-	environmentVariables[environmentNameRoutingConfigurationFilePath] = "rules.json"
+	environmentVariables[environmentNameRoutingRules] = "claims=service2,billing=service3"
 	environmentVariables[environmentNameDefaultDestination] = "service2"
 	environmentVariables[environmentNameRabbitMQHost] = "broker.internal"
 	environmentVariables[environmentNameRabbitMQPort] = "5673"
 	environmentVariables[environmentNameRabbitMQManagementURL] = "https://broker.internal:15672"
-	environmentVariables[environmentNamePublishTimeout] = "3s"
-	environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "250ms, 2s, 15s"
+	environmentVariables[environmentNamePublishTimeoutSeconds] = "3"
+	environmentVariables[environmentNameRabbitMQReconnectBackoffSeconds] = "1, 2, 15"
 	environmentVariables[environmentNamePipelineWorkerCount] = "8"
 	environmentVariables[environmentNameWriteBatchSize] = "200"
-	environmentVariables[environmentNameWriteFlushInterval] = "2s"
+	environmentVariables[environmentNameWriteFlushIntervalSeconds] = "2"
 	environmentVariables[environmentNameDatabaseDirectoryPath] = "/var/log-engine"
-	environmentVariables[environmentNameDatabaseBusyTimeout] = "2500ms"
-	environmentVariables[environmentNameWriteRetryBackoffDelayList] = "500ms, 2s, 4s, 8s"
+	environmentVariables[environmentNameDatabaseBusyTimeoutSeconds] = "3"
+	environmentVariables[environmentNameWriteRetryBackoffSeconds] = "1, 2, 4, 8"
 	environmentVariables[environmentNameDeadLetterFilePath] = "failed/letters.jsonl"
 	environmentVariables[environmentNameDeadLetterMaximumFileSizeInBytes] = "20971520"
-	environmentVariables[environmentNameMetricsThroughputWindow] = "30s"
-	environmentVariables[environmentNameMetricsBacklogTimeout] = "750ms"
-	environmentVariables[environmentNameShutdownGracePeriod] = "45s"
+	environmentVariables[environmentNameMetricsThroughputWindowSeconds] = "30"
+	environmentVariables[environmentNameMetricsBacklogTimeoutSeconds] = "1"
+	environmentVariables[environmentNameShutdownGracePeriodSeconds] = "45"
 	applicationConfiguration, configurationError := newApplicationConfigurationFromEnvironment(environmentVariables)
 
 	if configurationError != nil {
@@ -209,8 +210,8 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 		t.Errorf("ApplicationEnvironment = %q, want %q", applicationConfiguration.ApplicationEnvironment, "staging")
 	}
 
-	if applicationConfiguration.RoutingConfigurationFilePath != "rules.json" {
-		t.Errorf("RoutingConfigurationFilePath = %q, want %q", applicationConfiguration.RoutingConfigurationFilePath, "rules.json")
+	if applicationConfiguration.RoutingRules["claims"] != "service2" || applicationConfiguration.RoutingRules["billing"] != "service3" {
+		t.Errorf("RoutingRules = %v, want claims=service2 billing=service3", applicationConfiguration.RoutingRules)
 	}
 
 	if applicationConfiguration.DefaultDestination != "service2" {
@@ -233,7 +234,7 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 		t.Errorf("PublishTimeout = %s, want 3s", applicationConfiguration.PublishTimeout)
 	}
 
-	expectedRabbitMQReconnectBackoffDelays := []time.Duration{250 * time.Millisecond, 2 * time.Second, 15 * time.Second}
+	expectedRabbitMQReconnectBackoffDelays := []time.Duration{1 * time.Second, 2 * time.Second, 15 * time.Second}
 
 	if len(applicationConfiguration.RabbitMQReconnectBackoffDelays) != len(expectedRabbitMQReconnectBackoffDelays) {
 		t.Fatalf("RabbitMQReconnectBackoffDelays has %d entries, want %d", len(applicationConfiguration.RabbitMQReconnectBackoffDelays), len(expectedRabbitMQReconnectBackoffDelays))
@@ -261,11 +262,11 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 		t.Errorf("DatabaseDirectoryPath = %q, want %q", applicationConfiguration.DatabaseDirectoryPath, "/var/log-engine")
 	}
 
-	if applicationConfiguration.DatabaseBusyTimeout != 2500*time.Millisecond {
-		t.Errorf("DatabaseBusyTimeout = %s, want 2.5s", applicationConfiguration.DatabaseBusyTimeout)
+	if applicationConfiguration.DatabaseBusyTimeout != 3*time.Second {
+		t.Errorf("DatabaseBusyTimeout = %s, want 3s", applicationConfiguration.DatabaseBusyTimeout)
 	}
 
-	expectedRetryBackoffDelays := []time.Duration{500 * time.Millisecond, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+	expectedRetryBackoffDelays := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
 
 	if len(applicationConfiguration.WriteRetryBackoffDelays) != len(expectedRetryBackoffDelays) {
 		t.Fatalf("WriteRetryBackoffDelays has %d entries, want %d", len(applicationConfiguration.WriteRetryBackoffDelays), len(expectedRetryBackoffDelays))
@@ -289,8 +290,8 @@ func TestNewApplicationConfigurationFromEnvironment_ParsesConfiguredValues(t *te
 		t.Errorf("MetricsThroughputWindow = %s, want 30s", applicationConfiguration.MetricsThroughputWindow)
 	}
 
-	if applicationConfiguration.MetricsBacklogTimeout != 750*time.Millisecond {
-		t.Errorf("MetricsBacklogTimeout = %s, want 750ms", applicationConfiguration.MetricsBacklogTimeout)
+	if applicationConfiguration.MetricsBacklogTimeout != 1*time.Second {
+		t.Errorf("MetricsBacklogTimeout = %s, want 1s", applicationConfiguration.MetricsBacklogTimeout)
 	}
 
 	if applicationConfiguration.ShutdownGracePeriod != 45*time.Second {
@@ -364,16 +365,16 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 		{
 			name: "channel send timeout is not a duration",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameChannelSendTimeout] = "fast"
+				environmentVariables[environmentNameChannelSendTimeoutMillis] = "fast"
 			},
-			expectedErrorSubstrings: []string{"CHANNEL_SEND_TIMEOUT", "not a valid duration"},
+			expectedErrorSubstrings: []string{"CHANNEL_SEND_TIMEOUT_IN_MILLISECONDS", "not a valid integer"},
 		},
 		{
 			name: "publish timeout is not positive",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNamePublishTimeout] = "-5s"
+				environmentVariables[environmentNamePublishTimeoutSeconds] = "-5"
 			},
-			expectedErrorSubstrings: []string{"PUBLISH_TIMEOUT", "positive duration"},
+			expectedErrorSubstrings: []string{"PUBLISH_TIMEOUT_IN_SECONDS", "positive integer"},
 		},
 		{
 			name: "write batch size is zero",
@@ -385,37 +386,37 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 		{
 			name: "database busy timeout is not positive",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameDatabaseBusyTimeout] = "0s"
+				environmentVariables[environmentNameDatabaseBusyTimeoutSeconds] = "0"
 			},
-			expectedErrorSubstrings: []string{"DB_BUSY_TIMEOUT", "positive duration"},
+			expectedErrorSubstrings: []string{"DB_BUSY_TIMEOUT_IN_SECONDS", "positive integer"},
 		},
 		{
 			name: "retry backoff list contains a zero duration",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameWriteRetryBackoffDelayList] = "1s,0s,10s"
+				environmentVariables[environmentNameWriteRetryBackoffSeconds] = "1,0,10"
 			},
-			expectedErrorSubstrings: []string{"RETRY_BACKOFFS", "positive durations"},
+			expectedErrorSubstrings: []string{"RETRY_BACKOFFS_IN_SECONDS", "positive integers"},
 		},
 		{
 			name: "retry backoff list contains a non duration",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameWriteRetryBackoffDelayList] = "1s,whenever"
+				environmentVariables[environmentNameWriteRetryBackoffSeconds] = "1,whenever"
 			},
-			expectedErrorSubstrings: []string{"RETRY_BACKOFFS", "not a valid duration"},
+			expectedErrorSubstrings: []string{"RETRY_BACKOFFS_IN_SECONDS", "not a valid integer"},
 		},
 		{
 			name: "reconnect backoff list contains a zero duration",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "1s,0s"
+				environmentVariables[environmentNameRabbitMQReconnectBackoffSeconds] = "1,0"
 			},
-			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS", "positive durations"},
+			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS_IN_SECONDS", "positive integers"},
 		},
 		{
 			name: "reconnect backoff list contains a non duration",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameRabbitMQReconnectBackoffDelayList] = "soon"
+				environmentVariables[environmentNameRabbitMQReconnectBackoffSeconds] = "soon"
 			},
-			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS", "not a valid duration"},
+			expectedErrorSubstrings: []string{"RABBITMQ_RECONNECT_BACKOFFS_IN_SECONDS", "not a valid integer"},
 		},
 		{
 			name: "consumer batch size exceeds the raw logs buffer",
@@ -435,16 +436,16 @@ func TestNewApplicationConfigurationFromEnvironment_RejectsInvalidSettings(t *te
 		{
 			name: "shutdown grace period is not positive",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameShutdownGracePeriod] = "0s"
+				environmentVariables[environmentNameShutdownGracePeriodSeconds] = "0"
 			},
-			expectedErrorSubstrings: []string{"SHUTDOWN_GRACE_PERIOD", "positive duration"},
+			expectedErrorSubstrings: []string{"SHUTDOWN_GRACE_PERIOD_IN_SECONDS", "positive integer"},
 		},
 		{
 			name: "shutdown grace period is not a duration",
 			environmentMutation: func(environmentVariables map[string]string) {
-				environmentVariables[environmentNameShutdownGracePeriod] = "eventually"
+				environmentVariables[environmentNameShutdownGracePeriodSeconds] = "eventually"
 			},
-			expectedErrorSubstrings: []string{"SHUTDOWN_GRACE_PERIOD", "not a valid duration"},
+			expectedErrorSubstrings: []string{"SHUTDOWN_GRACE_PERIOD_IN_SECONDS", "not a valid integer"},
 		},
 	}
 	for _, testCase := range testCases {
@@ -511,5 +512,48 @@ func TestNewApplicationConfigurationFromEnvironment_WrapsMissingRequiredSetting(
 
 	if !errors.Is(configurationError, errMissingRequiredSetting) {
 		t.Errorf("error %v should wrap errMissingRequiredSetting", configurationError)
+	}
+}
+
+func TestNewApplicationConfigurationLoadsOptionalFileAndEnvironment(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for name, value := range aValidMinimalEnvironment(t) {
+		t.Setenv(name, value)
+	}
+	t.Setenv("HTTP_PORT", "18081")
+	t.Setenv("APP_ENV", "")
+	if err := os.Unsetenv("APP_ENV"); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := NewApplicationConfiguration()
+	if err != nil || configuration.HTTPPort != 18081 {
+		t.Fatalf("environment without .env: %+v, %v", configuration, err)
+	}
+	if err := os.WriteFile(".env", []byte("HTTP_PORT=18082\nAPP_ENV=from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err = NewApplicationConfiguration()
+	if err != nil || configuration.HTTPPort != 18081 || configuration.ApplicationEnvironment != "from-file" {
+		t.Fatalf("file/environment precedence: %+v, %v", configuration, err)
+	}
+	t.Setenv("APP_ENV", "")
+	configuration, err = NewApplicationConfiguration()
+	if err != nil || configuration.ApplicationEnvironment != defaultApplicationEnvironment {
+		t.Fatalf("empty process value must override file: %+v, %v", configuration, err)
+	}
+	if err := os.WriteFile(".env", []byte("!invalid env syntax"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewApplicationConfiguration(); err == nil {
+		t.Fatal("malformed .env must fail")
+	}
+	if err := os.Remove(".env"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(".env", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewApplicationConfiguration(); err == nil {
+		t.Fatal("read errors other than missing must fail")
 	}
 }

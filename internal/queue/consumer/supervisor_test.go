@@ -26,13 +26,6 @@ func (recordingStorageHandler *recordingStorageHandler) StoreBatch(destination m
 	return nil
 }
 
-// Counts the recorded batches.
-func (recordingStorageHandler *recordingStorageHandler) recordedBatchCount() int {
-	recordingStorageHandler.mutex.Lock()
-	defer recordingStorageHandler.mutex.Unlock()
-	return len(recordingStorageHandler.storedBatches)
-}
-
 // Records the dial attempts and the reconnect delays a supervisor uses.
 type supervisorDialRecorder struct {
 	mutex              sync.Mutex

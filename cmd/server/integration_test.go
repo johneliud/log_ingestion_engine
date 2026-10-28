@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/johneliud/log_ingestion_engine/internal/config"
 	"github.com/johneliud/log_ingestion_engine/internal/model"
 	"github.com/johneliud/log_ingestion_engine/internal/queue"
+	"github.com/johneliud/log_ingestion_engine/internal/spool"
 )
 
 const (
@@ -39,14 +41,12 @@ type storedLogRow struct {
 func integrationTestConfiguration(t *testing.T) config.ApplicationConfiguration {
 	t.Helper()
 
-	repositoryConfigurationFilePath := filepath.Join(integrationTestRepositoryRoot, ".env")
-	if os.Getenv("CONFIG_FILE_PATH") == "" {
-		if _, statError := os.Stat(repositoryConfigurationFilePath); statError == nil {
-			t.Setenv("CONFIG_FILE_PATH", repositoryConfigurationFilePath)
-		}
-	}
-
-	brokerConfiguration, configurationError := config.NewApplicationConfiguration()
+	var brokerConfiguration config.ApplicationConfiguration
+	var configurationError error
+	t.Run("load broker configuration from repository root", func(t *testing.T) {
+		t.Chdir(integrationTestRepositoryRoot)
+		brokerConfiguration, configurationError = config.NewApplicationConfiguration()
+	})
 	if configurationError != nil {
 		t.Skipf("skipping the integration test because the broker configuration is missing: %v", configurationError)
 	}
@@ -276,11 +276,11 @@ func TestIntegration_FullPipelineStoresTheEnrichedAndRoutedLogsInTheDestinationD
 	requireTheBroker(t, applicationConfiguration)
 	purgeTheDestinationQueues(t, applicationConfiguration)
 
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{
+	applicationConfiguration.RoutingRules = map[string]string{
 		"claims":   "service1",
 		"payments": "service2",
 		"policy":   "service3",
-	})
+	}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices([]string{"claims", "payments", "policy"}))
@@ -320,9 +320,57 @@ func TestIntegration_FullPipelineStoresTheEnrichedAndRoutedLogsInTheDestinationD
 	}
 }
 
+func TestIntegration_ReplaysASpoolLargerThanTheRawLogsQueueCapacity(t *testing.T) {
+	applicationConfiguration := integrationTestConfiguration(t)
+	requireTheBroker(t, applicationConfiguration)
+	purgeTheDestinationQueues(t, applicationConfiguration)
+
+	applicationConfiguration.RawLogsBufferSize = 100
+	applicationConfiguration.ConsumerBatchSize = 50
+	applicationConfiguration.ChannelSendTimeout = 20 * time.Millisecond
+	applicationConfiguration.SpoolFilePath = filepath.Join(t.TempDir(), "ingestion-spool.log")
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
+
+	// More than twice the queue capacity: a replay that runs before the pipeline consumers would fill the queue and drop the overflow.
+	const spooledLogCount = 250
+	spoolingSpool, spoolError := spool.NewSpool(applicationConfiguration.SpoolFilePath)
+	if spoolError != nil {
+		t.Fatalf("creating the spool failed: %v", spoolError)
+	}
+	spooledLogs := make([]model.RawLog, 0, spooledLogCount)
+	for range spooledLogCount {
+		spooledLogs = append(spooledLogs, model.RawLog{
+			LogEntry: model.LogEntry{
+				Timestamp: "2026-10-28T12:00:00.000000Z",
+				Service:   "claims",
+				Level:     model.LogLevelInfo,
+				Message:   "spooled before the restart",
+			},
+			LogID:      uuid.NewString(),
+			BatchID:    uuid.NewString(),
+			ReceivedAt: time.Now(),
+		})
+	}
+	if appendError := spoolingSpool.Append(spooledLogs); appendError != nil {
+		t.Fatalf("filling the spool failed: %v", appendError)
+	}
+	if closeError := spoolingSpool.Close(); closeError != nil {
+		t.Fatalf("closing the spool failed: %v", closeError)
+	}
+
+	newTestServerApplication(t, applicationConfiguration)
+
+	databaseFilePath := filepath.Join(applicationConfiguration.DatabaseDirectoryPath, config.DatabaseFileService1Name)
+	waitForStoredLogCount(t, databaseFilePath, "claims", spooledLogCount)
+
+	if deadLetterEntryCount := len(readDeadLetterEntries(t, applicationConfiguration.DeadLetterFilePath)); deadLetterEntryCount != 0 {
+		t.Errorf("dead letter entry count = %d, want 0", deadLetterEntryCount)
+	}
+}
+
 func TestIntegration_RabbitMQOutageStoresTheAcceptedLogsThroughTheFallback(t *testing.T) {
 	applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices([]string{"claims", "claims", "claims"}))
@@ -355,11 +403,11 @@ func TestIntegration_SQLiteBatchingFlushesAtTheBatchSizeAndAtTheFlushInterval(t 
 			applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
 			applicationConfiguration.WriteBatchSize = batchingCase.writeBatchSize
 			applicationConfiguration.WriteFlushInterval = batchingCase.writeFlushInterval
-			writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+			applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 			serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 			serviceNames := make([]string, 0, batchingCase.logCount)
-			for logIndex := 0; logIndex < batchingCase.logCount; logIndex++ {
+			for range batchingCase.logCount {
 				serviceNames = append(serviceNames, "claims")
 			}
 			responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices(serviceNames))
@@ -379,7 +427,7 @@ func TestIntegration_SQLiteBatchingFlushesAtTheBatchSizeAndAtTheFlushInterval(t 
 func TestIntegration_RetriesAndDeadLettersTheLogsThatCannotBeStored(t *testing.T) {
 	applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
 	applicationConfiguration.DeadLetterMaximumFileSizeInBytes = 1024
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	if closeError := serverApplication.sqliteLogStore.Close(); closeError != nil {
@@ -387,7 +435,7 @@ func TestIntegration_RetriesAndDeadLettersTheLogsThatCannotBeStored(t *testing.T
 	}
 
 	serviceNames := make([]string, 0, 10)
-	for logIndex := 0; logIndex < 10; logIndex++ {
+	for range 10 {
 		serviceNames = append(serviceNames, "claims")
 	}
 	responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices(serviceNames))
@@ -422,7 +470,7 @@ func TestIntegration_GracefulShutdownStoresEveryAcceptedLog(t *testing.T) {
 	requireTheBroker(t, applicationConfiguration)
 	purgeTheDestinationQueues(t, applicationConfiguration)
 
-	writeRoutingRules(t, applicationConfiguration.RoutingConfigurationFilePath, map[string]string{"claims": "service1"})
+	applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
 	serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 	acceptedLogCount := 200
@@ -450,4 +498,97 @@ func TestIntegration_GracefulShutdownStoresEveryAcceptedLog(t *testing.T) {
 
 	newTestServerApplication(t, applicationConfiguration)
 	waitForStoredLogCount(t, databaseFilePath, "claims", acceptedLogCount)
+}
+
+func TestIntegration_LargeSpoolReplaysThroughFallbackWithoutBlockingStartup(t *testing.T) {
+	configuration := integrationTestConfigurationWithoutBroker(t)
+	configuration.RawLogsBufferSize = 2
+	configuration.ConsumerBatchSize = 2
+	configuration.PipelineWorkerCount = 1
+	configuration.WriteBatchSize = 1
+	configuration.SpoolFilePath = filepath.Join(t.TempDir(), "spool")
+	s, err := spool.NewSpool(configuration.SpoolFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := make([]model.RawLog, 30)
+	for index := range logs {
+		logs[index] = model.RawLog{LogEntry: model.LogEntry{Timestamp: "2026-10-28T12:00:00Z", Service: "claims", Level: model.LogLevelInfo, Message: "replayed"}, LogID: uuid.NewString(), BatchID: uuid.NewString(), ReceivedAt: time.Now()}
+	}
+	if err := s.Append(logs); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	type result struct {
+		application *serverApplication
+		err         error
+	}
+	var application *serverApplication
+	started := make(chan result, 1)
+	go func() { application, err := newServerApplication(configuration); started <- result{application, err} }()
+	select {
+	case applicationResult := <-started:
+		if applicationResult.err != nil {
+			t.Fatal(applicationResult.err)
+		}
+		application = applicationResult.application
+		t.Cleanup(func() {
+			if err := applicationResult.application.shutdownBackgroundWork(aTestShutdownContext(t)); err != nil {
+				t.Error(err)
+			}
+		})
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup blocked while replaying spool")
+	}
+	// A full fallback deliberately sends overflow to durable dead letters.
+	deadline := time.NewTimer(integrationTestWaitTimeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(integrationTestPollInterval)
+	defer poll.Stop()
+	for {
+		unacked, err := application.ingestionSpool.Unacked()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unacked) == 0 {
+			break
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			t.Fatalf("%d replayed logs never reached a durable sink", len(unacked))
+		}
+	}
+	database, err := sql.Open("sqlite", filepath.Join(configuration.DatabaseDirectoryPath, config.DatabaseFileService1Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query("SELECT log_id FROM logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	durableIDs := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		durableIDs[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(durableIDs) == 0 {
+		t.Fatal("storage workers never drained the fallback")
+	}
+	for _, entry := range readDeadLetterEntries(t, configuration.DeadLetterFilePath) {
+		durableIDs[entry.Log.LogID] = true
+	}
+	for _, log := range logs {
+		if !durableIDs[log.LogID] {
+			t.Errorf("replayed log %q missing from durable sinks", log.LogID)
+		}
+	}
 }

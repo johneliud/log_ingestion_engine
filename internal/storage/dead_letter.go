@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,13 +17,18 @@ import (
 
 const defaultDeadLetterBufferSize = 1000
 
+type deadLetterSubmission struct {
+	entry  model.DeadLetterEntry
+	result chan error
+}
+
 var errDeadLetterWriterStopped = errors.New("dead letter writer is stopped")
 
 // Writes dead letter entries as newline-delimited JSON from one goroutine.
 type DeadLetterWriter struct {
 	deadLetterFilePath     string
 	maximumFileSizeInBytes int64
-	entriesChannel         chan model.DeadLetterEntry
+	entriesChannel         chan deadLetterSubmission
 	stoppedChannel         chan struct{}
 	mutex                  sync.Mutex
 	closed                 bool
@@ -34,23 +40,26 @@ func NewDeadLetterWriter(applicationConfiguration config.ApplicationConfiguratio
 	return &DeadLetterWriter{
 		deadLetterFilePath:     applicationConfiguration.DeadLetterFilePath,
 		maximumFileSizeInBytes: int64(applicationConfiguration.DeadLetterMaximumFileSizeInBytes),
-		entriesChannel:         make(chan model.DeadLetterEntry, defaultDeadLetterBufferSize),
+		entriesChannel:         make(chan deadLetterSubmission, defaultDeadLetterBufferSize),
 		stoppedChannel:         make(chan struct{}),
 		writerDone:             make(chan struct{}),
 	}
 }
 
-// Enqueues a dead letter entry, waiting for room unless the writer has stopped.
+// Submits an entry and waits for its durable write and sync result.
 func (deadLetterWriter *DeadLetterWriter) Submit(deadLetterEntry model.DeadLetterEntry) error {
+	submission := deadLetterSubmission{entry: deadLetterEntry, result: make(chan error, 1)}
 	deadLetterWriter.mutex.Lock()
-	defer deadLetterWriter.mutex.Unlock()
 	if deadLetterWriter.closed {
+		deadLetterWriter.mutex.Unlock()
 		return errDeadLetterWriterStopped
 	}
 	select {
-	case deadLetterWriter.entriesChannel <- deadLetterEntry:
-		return nil
+	case deadLetterWriter.entriesChannel <- submission:
+		deadLetterWriter.mutex.Unlock()
+		return <-submission.result
 	case <-deadLetterWriter.stoppedChannel:
+		deadLetterWriter.mutex.Unlock()
 		return errDeadLetterWriterStopped
 	}
 }
@@ -90,41 +99,27 @@ func (deadLetterWriter *DeadLetterWriter) writeEntriesUntilClosed() {
 		}
 	}()
 
-	for deadLetterEntry := range deadLetterWriter.entriesChannel {
-		deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, deadLetterEntry)
-	}
-	deadLetterWriter.drainEntries(&deadLetterFile, &currentFileSizeInBytes)
-}
-
-// Writes every entry still queued after cancellation before the writer exits.
-func (deadLetterWriter *DeadLetterWriter) drainEntries(deadLetterFile **os.File, currentFileSizeInBytes *int64) {
-	for {
-		select {
-		case deadLetterEntry, ok := <-deadLetterWriter.entriesChannel:
-			if !ok {
-				return
-			}
-			deadLetterWriter.writeEntry(deadLetterFile, currentFileSizeInBytes, deadLetterEntry)
-		default:
-			return
+	for submission := range deadLetterWriter.entriesChannel {
+		err := deadLetterWriter.writeEntry(&deadLetterFile, &currentFileSizeInBytes, submission.entry)
+		if err != nil {
+			slog.Error("writing dead letter entry failed", "error", err, "batch_id", submission.entry.Log.BatchID)
 		}
+		submission.result <- err
 	}
 }
 
-// Writes one entry, opening or rotating the file when necessary, and logs any failure with its details.
-func (deadLetterWriter *DeadLetterWriter) writeEntry(deadLetterFile **os.File, currentFileSizeInBytes *int64, deadLetterEntry model.DeadLetterEntry) {
+// Writes one entry, opening or rotating the file when necessary, and returns any write or sync failure.
+func (deadLetterWriter *DeadLetterWriter) writeEntry(deadLetterFile **os.File, currentFileSizeInBytes *int64, deadLetterEntry model.DeadLetterEntry) error {
 	serializedEntry, marshalError := json.Marshal(deadLetterEntry)
 	if marshalError != nil {
-		slog.Error("marshalling dead letter entry failed", "error", marshalError, "batch_id", deadLetterEntry.Log.BatchID, "destination", deadLetterEntry.Log.Destination)
-		return
+		return fmt.Errorf("marshalling dead letter entry failed: %w", marshalError)
 	}
 	serializedEntry = append(serializedEntry, '\n')
 
 	if *deadLetterFile == nil {
 		openedFile, fileSizeInBytes, openError := openOrCreateDeadLetterFile(deadLetterWriter.deadLetterFilePath)
 		if openError != nil {
-			slog.Error("opening dead letter file failed", "error", openError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
-			return
+			return fmt.Errorf("opening dead letter file failed: %w", openError)
 		}
 		*deadLetterFile = openedFile
 		*currentFileSizeInBytes = fileSizeInBytes
@@ -132,20 +127,19 @@ func (deadLetterWriter *DeadLetterWriter) writeEntry(deadLetterFile **os.File, c
 
 	if *currentFileSizeInBytes > 0 && *currentFileSizeInBytes+int64(len(serializedEntry)) > deadLetterWriter.maximumFileSizeInBytes {
 		if closeError := (*deadLetterFile).Close(); closeError != nil {
-			slog.Error("closing dead letter file before rotation failed", "error", closeError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
+			*deadLetterFile = nil
+			return fmt.Errorf("closing dead letter file before rotation: %w", closeError)
 		}
 
 		*deadLetterFile = nil
 
 		if rotateError := rotateDeadLetterFile(deadLetterWriter.deadLetterFilePath); rotateError != nil {
-			slog.Error("rotating dead letter file failed", "error", rotateError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
-			return
+			return fmt.Errorf("rotating dead letter file failed: %w", rotateError)
 		}
 
 		openedFile, fileSizeInBytes, openError := openOrCreateDeadLetterFile(deadLetterWriter.deadLetterFilePath)
 		if openError != nil {
-			slog.Error("opening dead letter file after rotation failed", "error", openError, "dead_letter_path", deadLetterWriter.deadLetterFilePath)
-			return
+			return fmt.Errorf("opening dead letter file after rotation failed: %w", openError)
 		}
 		*deadLetterFile = openedFile
 		*currentFileSizeInBytes = fileSizeInBytes
@@ -153,10 +147,17 @@ func (deadLetterWriter *DeadLetterWriter) writeEntry(deadLetterFile **os.File, c
 
 	writtenByteCount, writeError := (*deadLetterFile).Write(serializedEntry)
 	if writeError != nil {
-		slog.Error("writing dead letter entry failed", "error", writeError, "batch_id", deadLetterEntry.Log.BatchID, "destination", deadLetterEntry.Log.Destination)
-		return
+		return fmt.Errorf("writing dead letter entry failed: %w", writeError)
 	}
 	*currentFileSizeInBytes += int64(writtenByteCount)
+
+	if writtenByteCount != len(serializedEntry) {
+		return io.ErrShortWrite
+	}
+	if syncError := (*deadLetterFile).Sync(); syncError != nil {
+		return fmt.Errorf("syncing dead letter file: %w", syncError)
+	}
+	return nil
 }
 
 // Opens the dead letter file for appending and reports its current size.

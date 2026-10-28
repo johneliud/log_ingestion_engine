@@ -125,35 +125,30 @@ func TestMetrics_UpdatesAreSafeUnderConcurrency(t *testing.T) {
 	const logsPerGoroutine = 100
 
 	var waitGroup sync.WaitGroup
-	waitGroup.Add(goroutineCount * 4)
 
 	for range goroutineCount {
-		go func() {
-			defer waitGroup.Done()
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordLogsReceived([]model.LogEntry{
 					{Service: "claims", Level: model.LogLevelInfo},
 				})
 			}
-		}()
-		go func() {
-			defer waitGroup.Done()
+		})
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordRateLimitedRequest()
 			}
-		}()
-		go func() {
-			defer waitGroup.Done()
+		})
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordDeadLetteredLog()
 			}
-		}()
-		go func() {
-			defer waitGroup.Done()
+		})
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordWriteFailure()
 			}
-		}()
+		})
 	}
 
 	waitGroup.Wait()
@@ -255,5 +250,163 @@ func TestMetrics_FallbackQueueBacklogCounterDropsForReleasedMessages(t *testing.
 	metricsRegistry.RecordQueueMessageReleased()
 	if fallbackBacklog := metricsRegistry.FallbackQueueBacklog(); fallbackBacklog != 0 {
 		t.Errorf("fallback backlog = %d, want 0; the counter must not fall below zero", fallbackBacklog)
+	}
+}
+
+// Returns a metrics registry whose broadcast and history sampling loop is not running, so tests can drive the sampling deterministically.
+func newMetricsRegistryWithoutBroadcastLoop(currentTimeProvider func() time.Time) *Metrics {
+	return &Metrics{
+		logsByLevel:         make(map[model.LogLevel]uint64),
+		logsByService:       make(map[string]uint64),
+		throughputWindow:    time.Minute,
+		currentTimeProvider: currentTimeProvider,
+		subscribers:         make(map[chan Snapshot]struct{}),
+		changeNotifier:      make(chan struct{}, 1),
+		broadcastDone:       make(chan struct{}),
+	}
+}
+
+func TestMetrics_LogsPerSecondMatchesThroughput(t *testing.T) {
+	t.Parallel()
+
+	currentTime := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	metricsRegistry := newMetricsRegistryWithoutBroadcastLoop(func() time.Time { return currentTime })
+	metricsRegistry.RecordLogsReceived([]model.LogEntry{
+		{Service: "claims", Level: model.LogLevelInfo},
+		{Service: "claims", Level: model.LogLevelInfo},
+		{Service: "claims", Level: model.LogLevelInfo},
+		{Service: "claims", Level: model.LogLevelInfo},
+		{Service: "claims", Level: model.LogLevelInfo},
+	})
+
+	snapshot := metricsRegistry.Snapshot()
+	expectedLogsPerSecond := 5.0 / 60.0
+	if snapshot.LogsPerSecond != expectedLogsPerSecond {
+		t.Errorf("LogsPerSecond = %f, want %f", snapshot.LogsPerSecond, expectedLogsPerSecond)
+	}
+	if snapshot.LogsPerSecond != snapshot.Throughput {
+		t.Errorf("LogsPerSecond = %f, want the throughput value %f", snapshot.LogsPerSecond, snapshot.Throughput)
+	}
+}
+
+func TestMetrics_HistorySamplingRecordsThroughputAndErrorRateOverTime(t *testing.T) {
+	t.Parallel()
+
+	currentTime := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	metricsRegistry := newMetricsRegistryWithoutBroadcastLoop(func() time.Time { return currentTime })
+	metricsRegistry.RecordLogsReceived([]model.LogEntry{
+		{Service: "claims", Level: model.LogLevelInfo},
+		{Service: "claims", Level: model.LogLevelError},
+	})
+
+	metricsRegistry.sampleHistoryIfDue()
+	currentTime = currentTime.Add(historySampleInterval)
+	metricsRegistry.RecordLogsReceived([]model.LogEntry{
+		{Service: "claims", Level: model.LogLevelInfo},
+	})
+	metricsRegistry.sampleHistoryIfDue()
+
+	snapshot := metricsRegistry.Snapshot()
+	if len(snapshot.ThroughputHistory) != 2 {
+		t.Fatalf("throughput history point count = %d, want 2", len(snapshot.ThroughputHistory))
+	}
+	if len(snapshot.ErrorRateHistory) != 2 {
+		t.Fatalf("error rate history point count = %d, want 2", len(snapshot.ErrorRateHistory))
+	}
+	if snapshot.ThroughputHistory[0].Time != "2026-10-26T12:00:00Z" {
+		t.Errorf("first throughput sample time = %q, want %q", snapshot.ThroughputHistory[0].Time, "2026-10-26T12:00:00Z")
+	}
+	if snapshot.ThroughputHistory[0].Value != 2.0/60.0 {
+		t.Errorf("first throughput sample = %f, want %f", snapshot.ThroughputHistory[0].Value, 2.0/60.0)
+	}
+	if snapshot.ErrorRateHistory[0].Value != 0.5 {
+		t.Errorf("first error rate sample = %f, want 0.5", snapshot.ErrorRateHistory[0].Value)
+	}
+	if snapshot.ErrorRateHistory[1].Value != 1.0/3.0 {
+		t.Errorf("second error rate sample = %f, want %f", snapshot.ErrorRateHistory[1].Value, 1.0/3.0)
+	}
+}
+
+func TestMetrics_HistorySamplingSkipsSamplesInsideTheIntervalAndKeepsOnlyRecentPoints(t *testing.T) {
+	t.Parallel()
+
+	currentTime := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	metricsRegistry := newMetricsRegistryWithoutBroadcastLoop(func() time.Time { return currentTime })
+
+	metricsRegistry.sampleHistoryIfDue()
+	metricsRegistry.sampleHistoryIfDue()
+	if historyPointCount := len(metricsRegistry.Snapshot().ThroughputHistory); historyPointCount != 1 {
+		t.Errorf("throughput history point count = %d, want 1; a sample inside the interval must be skipped", historyPointCount)
+	}
+
+	for range maximumHistoryPoints + 5 {
+		currentTime = currentTime.Add(historySampleInterval)
+		metricsRegistry.sampleHistoryIfDue()
+	}
+	if historyPointCount := len(metricsRegistry.Snapshot().ThroughputHistory); historyPointCount != maximumHistoryPoints {
+		t.Errorf("throughput history point count = %d, want at most %d", historyPointCount, maximumHistoryPoints)
+	}
+}
+
+func TestMetrics_SubscribeAndUnsubscribeAreSafeWhileSnapshotsBroadcast(t *testing.T) {
+	t.Parallel()
+
+	metricsRegistry := NewMetrics(time.Minute, nil)
+	const iterationCount = 200
+
+	var recorders sync.WaitGroup
+	recorders.Add(1)
+	go func() {
+		defer recorders.Done()
+		for range iterationCount {
+			metricsRegistry.RecordLogsReceived([]model.LogEntry{
+				{Service: "claims", Level: model.LogLevelInfo},
+			})
+		}
+	}()
+
+	var subscribers sync.WaitGroup
+	for range 4 {
+		subscribers.Add(1)
+		go func() {
+			defer subscribers.Done()
+			for range iterationCount {
+				channel := metricsRegistry.Subscribe()
+				select {
+				case <-channel:
+				default:
+				}
+				metricsRegistry.Unsubscribe(channel)
+			}
+		}()
+	}
+
+	subscribers.Wait()
+	recorders.Wait()
+
+	// The subscriber map must end up empty and the registry must still serve snapshots without panicking.
+	if remainingSubscribers := len(metricsRegistry.subscribers); remainingSubscribers != 0 {
+		t.Errorf("remaining subscriber count = %d, want 0", remainingSubscribers)
+	}
+	if snapshot := metricsRegistry.Snapshot(); snapshot.TotalLogsReceived != iterationCount {
+		t.Errorf("TotalLogsReceived = %d, want %d", snapshot.TotalLogsReceived, iterationCount)
+	}
+}
+
+func TestMetricsBroadcastReplacesBufferedSnapshot(t *testing.T) {
+	registry := newMetricsRegistryWithoutBroadcastLoop(time.Now)
+	channel := registry.Subscribe()
+	defer registry.Unsubscribe(channel)
+	registry.RecordLogsReceived([]model.LogEntry{{Service: "one", Level: model.LogLevelInfo}})
+	registry.broadcastIfDirty()
+	registry.RecordLogsReceived([]model.LogEntry{{Service: "two", Level: model.LogLevelInfo}})
+	registry.broadcastIfDirty()
+	select {
+	case snapshot := <-channel:
+		if snapshot.TotalLogsReceived != 2 {
+			t.Fatalf("buffered total = %d, want latest total 2", snapshot.TotalLogsReceived)
+		}
+	default:
+		t.Fatal("missing snapshot")
 	}
 }

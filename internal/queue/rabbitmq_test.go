@@ -41,11 +41,11 @@ func TestPublisher_ReconnectsAfterBrokerRestoreWithoutRepublishingFallback(t *te
 	}
 
 	brokerPublishedLogs := make([]model.EnrichedLog, 0)
-	publisher.publishOperation = func(enrichedLog model.EnrichedLog) error {
+	publisher.publishOperation = func(enrichedLogs []model.EnrichedLog) error {
 		if !isBrokerAvailable.Load() {
 			return errors.New("broker unavailable")
 		}
-		brokerPublishedLogs = append(brokerPublishedLogs, enrichedLog)
+		brokerPublishedLogs = append(brokerPublishedLogs, enrichedLogs...)
 		return nil
 	}
 
@@ -191,7 +191,7 @@ func TestPublisher_CountsMessagesSentToTheBrokerAndToTheFallback(t *testing.T) {
 	publisher.mutex.Lock()
 	publisher.isConnected = true
 	publisher.mutex.Unlock()
-	publisher.publishOperation = func(enrichedLog model.EnrichedLog) error {
+	publisher.publishOperation = func(enrichedLogs []model.EnrichedLog) error {
 		return nil
 	}
 
@@ -209,6 +209,43 @@ func TestPublisher_CountsMessagesSentToTheBrokerAndToTheFallback(t *testing.T) {
 
 	if recordingRecorder.publishedMessageCount() != 2 {
 		t.Errorf("published message count = %d, want 2", recordingRecorder.publishedMessageCount())
+	}
+}
+
+func TestPublisher_PublishesOneBatchToTheBrokerAndCountsEveryMessage(t *testing.T) {
+	t.Parallel()
+
+	recordingRecorder := &recordingPublishMetricsRecorder{}
+	publisher := NewPublisher(config.ApplicationConfiguration{PublishTimeout: time.Second}, 10, WithPublishedMessageRecorder(recordingRecorder))
+	publisher.mutex.Lock()
+	publisher.isConnected = true
+	publisher.mutex.Unlock()
+
+	publishedBatches := make(chan []model.EnrichedLog, 1)
+	publisher.publishOperation = func(enrichedLogs []model.EnrichedLog) error {
+		publishedBatches <- enrichedLogs
+		return nil
+	}
+
+	batch := []model.EnrichedLog{
+		aQueueTestEnrichedLog("batch-one"),
+		aQueueTestEnrichedLog("batch-one"),
+		aQueueTestEnrichedLog("batch-one"),
+	}
+	if publishError := publisher.PublishBatch(batch); publishError != nil {
+		t.Fatalf("expected the broker to accept the batch, got error: %v", publishError)
+	}
+
+	select {
+	case publishedBatch := <-publishedBatches:
+		if len(publishedBatch) != len(batch) {
+			t.Errorf("published batch size = %d, want %d", len(publishedBatch), len(batch))
+		}
+	default:
+		t.Fatal("the batch never reached the publish operation")
+	}
+	if recordingRecorder.publishedMessageCount() != len(batch) {
+		t.Errorf("published message count = %d, want %d", recordingRecorder.publishedMessageCount(), len(batch))
 	}
 }
 
@@ -240,7 +277,7 @@ func TestPublisher_RejectsTheLogsItReceivesAfterItIsClosed(t *testing.T) {
 	publisher.mutex.Lock()
 	publisher.isConnected = true
 	publisher.mutex.Unlock()
-	publisher.publishOperation = func(enrichedLog model.EnrichedLog) error {
+	publisher.publishOperation = func(enrichedLogs []model.EnrichedLog) error {
 		return nil
 	}
 

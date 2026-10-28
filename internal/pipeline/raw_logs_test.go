@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -63,15 +64,12 @@ func TestRawLogsQueue_PushBatchDrains(t *testing.T) {
 		t.Fatalf("batch should fit")
 	}
 
-	rawLogsChannel := rawLogsQueue.RawLogsChannel()
 	count := 0
 	for count < 2 {
-		select {
-		case <-rawLogsChannel:
-			count++
-		default:
-			t.Fatalf("expected items in channel")
+		if _, hasMore := rawLogsQueue.TryReceive(); !hasMore {
+			t.Fatalf("expected items in the queue")
 		}
+		count++
 	}
 }
 
@@ -104,11 +102,12 @@ func TestRawLogsQueue_FailedReservationEnqueuesNothing(t *testing.T) {
 	if err := queue.PushBatch([]model.RawLog{{BatchID: "rejected"}, {BatchID: "rejected"}}); !errors.Is(err, ErrQueueOverloaded) {
 		t.Fatalf("PushBatch error = %v, want overload", err)
 	}
-	if len(queue.channel) != 2 {
-		t.Fatalf("queue length = %d, want 2; failed batch must enqueue nothing", len(queue.channel))
+	if queue.Len() != 2 {
+		t.Fatalf("queue length = %d, want 2; failed batch must enqueue nothing", queue.Len())
 	}
 	for range 2 {
-		if rawLog := <-queue.RawLogsChannel(); rawLog.BatchID != "existing" {
+		rawLog, hasMore := queue.TryReceive()
+		if !hasMore || rawLog.BatchID != "existing" {
 			t.Fatalf("unexpected entry from failed reservation: %+v", rawLog)
 		}
 	}
@@ -120,7 +119,7 @@ func TestRawLogsQueue_RejectsOversizedBatchDistinctly(t *testing.T) {
 	if err := queue.PushBatch([]model.RawLog{{}, {}}); !errors.Is(err, ErrBatchTooLarge) {
 		t.Fatalf("PushBatch error = %v, want oversized batch", err)
 	}
-	if len(queue.channel) != 0 {
+	if queue.Len() != 0 {
 		t.Fatal("oversized batch must enqueue nothing")
 	}
 	if err := queue.PushBatch(nil); err != nil {
@@ -136,8 +135,12 @@ func TestRawLogsQueue_WaitsForCapacityForEntireBatch(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() { result <- queue.PushBatch([]model.RawLog{{BatchID: "new"}, {BatchID: "new"}}) }()
-	<-queue.RawLogsChannel()
-	<-queue.RawLogsChannel()
+	if rawLog, hasMore := queue.TryReceive(); !hasMore || rawLog.BatchID != "existing" {
+		t.Fatalf("expected an existing log, got %+v", rawLog)
+	}
+	if rawLog, hasMore := queue.TryReceive(); !hasMore || rawLog.BatchID != "existing" {
+		t.Fatalf("expected an existing log, got %+v", rawLog)
+	}
 	select {
 	case err := <-result:
 		if err != nil {
@@ -147,7 +150,7 @@ func TestRawLogsQueue_WaitsForCapacityForEntireBatch(t *testing.T) {
 		t.Fatal("producer did not finish after capacity became available")
 	}
 	for _, batchID := range []string{"existing", "new", "new"} {
-		if rawLog := <-queue.RawLogsChannel(); rawLog.BatchID != batchID {
+		if rawLog, hasMore := queue.TryReceive(); !hasMore || rawLog.BatchID != batchID {
 			t.Fatalf("BatchID = %q, want %q", rawLog.BatchID, batchID)
 		}
 	}
@@ -156,8 +159,9 @@ func TestRawLogsQueue_WaitsForCapacityForEntireBatch(t *testing.T) {
 func TestRawLogsQueue_ProducerWaitIsBounded(t *testing.T) {
 	t.Parallel()
 	queue := NewRawLogsQueue(1, 20*time.Millisecond)
-	queue.producerLock <- struct{}{}
-	defer func() { <-queue.producerLock }()
+	if err := queue.PushBatch([]model.RawLog{{BatchID: "full"}}); err != nil {
+		t.Fatal(err)
+	}
 	result := make(chan error, 1)
 	go func() { result <- queue.PushBatch([]model.RawLog{{}}) }()
 	select {
@@ -166,10 +170,60 @@ func TestRawLogsQueue_ProducerWaitIsBounded(t *testing.T) {
 			t.Fatalf("PushBatch error = %v, want overload", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("waiting for another producer exceeded the timeout")
+		t.Fatal("waiting for a full queue exceeded the timeout")
 	}
-	if len(queue.channel) != 0 {
+	if queue.Len() != 1 {
 		t.Fatal("timed out producer must enqueue nothing")
+	}
+}
+
+func TestRawLogsQueue_ReceiveFreesCapacityForABlockedProducer(t *testing.T) {
+	t.Parallel()
+	queue := NewRawLogsQueue(1, 2*time.Second)
+	if err := queue.PushBatch([]model.RawLog{{BatchID: "queued"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	producerResult := make(chan error, 1)
+	go func() { producerResult <- queue.PushBatch([]model.RawLog{{BatchID: "new"}}) }()
+
+	if rawLog, queueOpen := queue.Receive(t.Context()); !queueOpen || rawLog.BatchID != "queued" {
+		t.Fatalf("expected the queued log, got %+v (open=%v)", rawLog, queueOpen)
+	}
+
+	select {
+	case pushError := <-producerResult:
+		if pushError != nil {
+			t.Fatalf("the blocked producer should succeed after capacity was freed: %v", pushError)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the blocked producer did not wake after capacity was freed")
+	}
+
+	if rawLog, hasMore := queue.TryReceive(); !hasMore || rawLog.BatchID != "new" {
+		t.Fatalf("expected the producer batch, got %+v", rawLog)
+	}
+}
+
+func TestRawLogsQueue_ReceiveStopsWhenTheContextIsCancelledOnAnEmptyQueue(t *testing.T) {
+	t.Parallel()
+	queue := NewRawLogsQueue(1, time.Second)
+
+	applicationContext, cancel := context.WithCancel(t.Context())
+	receiveCompleted := make(chan bool, 1)
+	go func() {
+		_, queueOpen := queue.Receive(applicationContext)
+		receiveCompleted <- queueOpen
+	}()
+
+	cancel()
+	select {
+	case queueOpen := <-receiveCompleted:
+		if queueOpen {
+			t.Fatal("Receive reported an open queue after the context was cancelled on an empty queue")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Receive did not stop after the context was cancelled")
 	}
 }
 
@@ -190,20 +244,82 @@ func TestRawLogsQueue_ConcurrentBatchesDoNotInterleave(t *testing.T) {
 		})
 	}
 	producers.Wait()
-	if len(queue.channel) != producerCount*batchSize {
-		t.Fatalf("queue length = %d, want %d", len(queue.channel), producerCount*batchSize)
+	if queue.Len() != producerCount*batchSize {
+		t.Fatalf("queue length = %d, want %d", queue.Len(), producerCount*batchSize)
 	}
 	seen := make(map[string]bool)
 	for range producerCount {
-		first := <-queue.RawLogsChannel()
+		first, hasMore := queue.TryReceive()
+		if !hasMore {
+			t.Fatal("expected a queued log")
+		}
 		if seen[first.BatchID] {
 			t.Fatalf("batch %q appeared more than once", first.BatchID)
 		}
 		seen[first.BatchID] = true
 		for range batchSize - 1 {
-			if next := <-queue.RawLogsChannel(); next.BatchID != first.BatchID {
+			next, hasMore := queue.TryReceive()
+			if !hasMore || next.BatchID != first.BatchID {
 				t.Fatalf("batches interleaved: %q followed by %q", first.BatchID, next.BatchID)
 			}
 		}
+	}
+}
+
+func TestRawLogsQueue_PushBatchWhenCapacityFreesQueuesEveryLogEvenBeyondTheCapacity(t *testing.T) {
+	queue := NewRawLogsQueue(10, 20*time.Millisecond)
+	logs := make([]model.RawLog, 25)
+	for logIndex := range logs {
+		logs[logIndex] = model.RawLog{LogID: fmt.Sprint(logIndex)}
+	}
+
+	pushCompletion := make(chan error, 1)
+	go func() {
+		pushCompletion <- queue.PushBatchWhenCapacityFrees(context.Background(), logs)
+	}()
+
+	receivedLogCount := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for {
+			if _, hasMore := queue.TryReceive(); !hasMore {
+				break
+			}
+			receivedLogCount++
+		}
+		select {
+		case pushError := <-pushCompletion:
+			if pushError != nil {
+				t.Fatalf("PushBatchWhenCapacityFrees error = %v", pushError)
+			}
+			for {
+				if _, hasMore := queue.TryReceive(); !hasMore {
+					break
+				}
+				receivedLogCount++
+			}
+			if receivedLogCount != len(logs) {
+				t.Fatalf("received log count = %d, want %d", receivedLogCount, len(logs))
+			}
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("received log count = %d, want %d", receivedLogCount, len(logs))
+		}
+	}
+}
+
+func TestRawLogsQueue_PushBatchWhenCapacityFreesStopsWhenTheContextIsCancelled(t *testing.T) {
+	queue := NewRawLogsQueue(1, 10*time.Millisecond)
+	if pushError := queue.PushBatch([]model.RawLog{{LogID: "queued"}}); pushError != nil {
+		t.Fatalf("filling the queue failed: %v", pushError)
+	}
+
+	applicationContext, cancelApplication := context.WithCancel(t.Context())
+	cancelApplication()
+	pushError := queue.PushBatchWhenCapacityFrees(applicationContext, []model.RawLog{{LogID: "replayed"}})
+	if !errors.Is(pushError, context.Canceled) {
+		t.Errorf("PushBatchWhenCapacityFrees error = %v, want %v", pushError, context.Canceled)
 	}
 }

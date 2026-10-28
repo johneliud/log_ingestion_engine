@@ -1,20 +1,18 @@
 # Configuration Reference
 
-Every runtime setting of the log ingestion engine. Each entry in the table below is defined as a constant in `internal/config/config.go` and documented with its default in `configs/.env.example`. The process environment always wins over the configuration file, and a missing configuration file is silently ignored.
+Every runtime setting of the log ingestion engine. Each entry in the table below is defined as a constant in `internal/config/config.go` and documented with its default in `configs/.env.example`. Settings are read from the optional `.env` file in the working directory via `github.com/joho/godotenv` and from the process environment.
 
 ## Where settings come from
 
-1. The process environment (`os.Environ`).
-2. The configuration file, `.env` by default, overridable with `CONFIG_FILE_PATH`; file settings never override the process environment.
+The process environment is loaded from `.env` via `godotenv.Read(".env")`. Values present in the process environment override those in `.env`. No external JSON configuration file is used.
 
-`RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER` and `RABBITMQ_PASS` are the only required settings; everything else falls back to the default shown below. No credential is ever hardcoded in the source: the binary reads them from the configuration file or the environment, and the compose stack injects the same variables into RabbitMQ.
+`RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER` and `RABBITMQ_PASS` are the only required settings; everything else falls back to the default shown below. No credential is ever hardcoded in the source: the binary reads them from `.env` or the environment, and the compose stack injects the same variables into RabbitMQ.
 
 ## Application settings
 
 | Variable | What it does | Default |
 |----------|--------------|---------|
-| `CONFIG_FILE_PATH` | Where the optional configuration file loads from | `.env` |
-| `HTTP_PORT` | TCP port `POST /logs`, `/metrics` and `/dashboard` listen on (1024–65535) | `8080` |
+| `HTTP_PORT` | TCP port `POST /logs` and `GET /metrics.json` listen on (1024–65535) | `8080` |
 | `APP_ENV` | Environment name embedded by the enricher into each stored row (the enricher writes it into `env` for every stored row) | `production` |
 | `MAX_BODY_BYTES` | Largest accepted request body in bytes; larger batches fail with the body-too-large error | `1048576` |
 | `TRUSTED_PROXIES` | Comma-separated CIDR prefixes allowed to forward `X-Forwarded-For`; empty means the header is ignored and the socket address decides | *(empty)* |
@@ -24,18 +22,18 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 | Variable | What it does | Default |
 |----------|--------------|---------|
 | `RATE_LIMIT` | Allowed requests per second per source IP (the limit counts requests, not logs) | `1000` |
-| `RATE_LIMIT_CLEANUP_INTERVAL` | How often the idle per-IP limiter entries are evicted | `1m` |
+| `RATE_LIMIT_CLEANUP_INTERVAL_IN_SECONDS` | How often the idle per-IP limiter entries are evicted | `60` |
 
 ## Ingestion buffer and pipeline
 
 | Variable | What it does | Default |
 |----------|--------------|---------|
 | `RAW_LOGS_BUFFER` | Capacity of the bounded `raw_logs` channel; when it is full, `POST /logs` answers `503 ingestion overloaded` | `10000` |
-| `CHANNEL_SEND_TIMEOUT` | How long a handler is allowed to wait for buffer space per pushed log | `100ms` |
+| `CHANNEL_SEND_TIMEOUT_IN_MILLISECONDS` | How long a handler is allowed to wait for buffer space per pushed log | `100` |
 | `PIPELINE_WORKER_COUNT` | Workers that enrich, route and publish, each with its own publisher confirm loop | `4` |
 | `CONSUMER_BATCH_SIZE` | Raw logs one pipeline worker takes in a pass; must not exceed `RAW_LOGS_BUFFER` | `50` |
-| `ROUTING_CONFIG_PATH` | JSON map of `service → destination` routing rules; a missing file falls back to the default destination | `configs/routing.json` |
-| `DEFAULT_DESTINATION` | Destination used when a service has no routing rule (or the rule file is missing) | `service1` |
+| `ROUTING_RULES` | Comma-separated `service=destination` pairs; e.g. `claims=service2,billing=service3`. Empty means no explicit rules | *(empty)* |
+| `DEFAULT_DESTINATION` | Destination used when a service has no routing rule | `service1` |
 
 ## RabbitMQ
 
@@ -47,8 +45,8 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 | `RABBITMQ_PASS` | Broker password (required; never hardcoded) | *(required)* |
 | `RABBITMQ_VHOST` | Virtual host the application connects to and fetches the queue backlog from | `/` |
 | `RABBITMQ_USE_TLS` | When `true`, the publisher and consumer URI uses `amqps` | `false` |
-| `PUBLISH_TIMEOUT` | How long a publisher waits for one log to be confirmed before falling back | `5s` |
-| `RABBITMQ_RECONNECT_BACKOFFS` | Comma-separated retry delays for reconnects; the last value repeats | `1s,5s,10s,30s` |
+| `PUBLISH_TIMEOUT_IN_SECONDS` | How long a publisher waits for one log to be confirmed before falling back | `5` |
+| `RABBITMQ_RECONNECT_BACKOFFS_IN_SECONDS` | Comma-separated retry delays in seconds for reconnects; the last value repeats | `1,5,10,30` |
 | `RABBITMQ_MGMT_URL` | Base URL of the management API used by `queue_backlog`; unset disables the live queue sum | *(empty)* |
 
 ## Storage
@@ -56,20 +54,22 @@ Every runtime setting of the log ingestion engine. Each entry in the table below
 | Variable | What it does | Default |
 |----------|--------------|---------|
 | `DB_DIR` | Directory holding one SQLite database per destination | `./data` |
-| `DB_BUSY_TIMEOUT` | SQLite busy timeout while a write contention is retried | `5s` |
+| `DB_BUSY_TIMEOUT_IN_SECONDS` | SQLite busy timeout while a write contention is retried | `5` |
 | `WRITE_BATCH_SIZE` | Queued logs buffered per destination before a write flush triggers | `100` |
-| `WRITE_FLUSH_INTERVAL` | Maximum time a partial buffer waits before flushing on the time trigger | `1s` |
-| `RETRY_BACKOFFS` | Comma-separated write retry delays, one retry attempt per entry; the log is dead-lettered after the last retry fails | `1s,5s,10s` |
+| `WRITE_FLUSH_INTERVAL_IN_SECONDS` | Maximum time a partial buffer waits before flushing on the time trigger | `1` |
+| `RETRY_BACKOFFS_IN_SECONDS` | Comma-separated write retry delays in seconds, one retry attempt per entry; the log is dead-lettered after the last retry fails | `1,5,10` |
 | `DEAD_LETTER_PATH` | Newline-delimited JSON file for logs whose write retries were exhausted | `logs-failed.json` |
 | `DEAD_LETTER_MAX_BYTES` | Dead letter file size after which it is rotated to `NAME.1` | `10485760` |
+| `SPOOL_PATH` | Durable write-ahead spool file for accepted logs; written and fsynced before `POST /logs` returns `202`, replayed on startup to recover any unacknowledged entry | `ingestion-spool.log` |
 
 ## Metrics, dashboard and shutdown
 
 | Variable | What it does | Default |
 |----------|--------------|---------|
-| `METRICS_THROUGHPUT_WINDOW` | Window over which `GET /metrics.json` throughput is averaged | `1m` |
-| `METRICS_BACKLOG_TIMEOUT` | Time budget for one management-API call when refreshing `queue_backlog` | `2s` |
-| `SHUTDOWN_GRACE_PERIOD` | Single deadline shared by every graceful shutdown phase | `30s` |
+| `METRICS_THROUGHPUT_WINDOW_IN_SECONDS` | Window over which `GET /metrics.json` throughput is averaged | `60` |
+| `METRICS_BACKLOG_TIMEOUT_IN_SECONDS` | Time budget for one management-API call when refreshing `queue_backlog` | `2` |
+| `SHUTDOWN_GRACE_PERIOD_IN_SECONDS` | Single deadline shared by every graceful shutdown phase | `30` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated list of origins allowed to consume `GET /metrics/events`. Empty denies cross-origin streams | *(empty)* |
 
 ## Fixed names (not overridable)
 

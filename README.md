@@ -6,7 +6,7 @@ A Go service that accepts logs over HTTP, validates and enriches them, routes th
 
 ## Architecture
 
-The source diagram lives in [`internal/dashboard/architecture.mmd`](internal/dashboard/architecture.mmd). The home page at `/` renders it with the vendored mermaid 11.6.0 library alongside a project summary, the design decisions and nav links to the dashboard and metrics. Every component receives a single `ApplicationConfiguration` loaded from the configuration file and process environment.
+The source diagram lives in [`frontend/public/architecture.mmd`](frontend/public/architecture.mmd) and is rendered by the React frontend on the home page alongside a project summary, the design decisions and nav links to the dashboard and metrics. Every component receives a single `ApplicationConfiguration` loaded from `.env` and the process environment.
 
 ```mermaid
 flowchart TB
@@ -19,7 +19,7 @@ flowchart TB
         validate["Validate batch<br/>body size + per-entry errors"]
     end
 
-    rawQueue[("raw_logs<br/>bounded channel")]
+    rawQueue[("raw_logs<br/>condition-variable queue")]
 
     subgraph processing["Pipeline worker pool"]
         direction TB
@@ -61,14 +61,14 @@ flowchart TB
     replay -.->|"replay"| sqlite
 ```
 
-Clients pass through the rate limiter to `POST /logs`, where the batch is validated and pushed into the bounded `raw_logs` channel. Pipeline workers enrich and route each log before the publisher sends it to RabbitMQ. If publishing fails, the log enters the bounded fallback instead.
+Clients pass through the rate limiter to `POST /logs`, where the batch is validated and pushed into the bounded, condition-variable `RawLogsQueue` (`raw_logs`). Pipeline workers enrich and route each log before the publisher sends it to RabbitMQ. If publishing fails, the log enters the bounded fallback instead.
 
 A consumer supervisor keeps one broker connection for the per-destination consumers and replaces it with backoff when a subscription ends. Consumers write through the retrying batch writer into one SQLite database per destination, and logs whose retries are exhausted go to the shared dead-letter file for later replay.
 
 ## Concurrency model
 
-- HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded `raw_logs` channel (`pipeline.RawLogsQueue` push with a per-log send budget, the whole request answers `503` when a push times out).
-- `PIPELINE_WORKER_COUNT` workers take batches from that one channel, enrich, route and publish each log, waiting for the broker confirm per log. They share one publisher whose bounded in-memory fallback and one fallback consumer drain it while disconnected.
+- HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded, condition-variable `pipeline.RawLogsQueue` (`raw_logs`, with a batch reservation timeout). A queue timeout returns `503` after the spooled batch is durably voided; if voiding fails, the durable batch is accepted for replay.
+- `PIPELINE_WORKER_COUNT` workers take batches from that one queue, enrich, route and publish each log, waiting for the broker confirm per log. They share one publisher whose bounded in-memory fallback and one fallback consumer drain it while disconnected.
 - One consumer per destination queue holds its own AMQP connection; the supervisor owns one shared connection and replaces failed subscriptions with backoff.
 - The batch writer is a single sink goroutine with per-destination buffers and one retry loop. The dead-letter writer is a single goroutine owning all file I/O. Metrics counters are mutex-guarded atomics-snapshot style.
 - Shutdown walks these pieces in reverse order under one grace-period deadline (see `Graceful shutdown`).
@@ -84,6 +84,7 @@ cd log_ingestion_engine
 
 - Go 1.26 or newer (`go version`)
 - Docker (only for RabbitMQ during development)
+- Node.js 24 or newer and npm (`node --version`, `npm --version`) only needed to build or run the React frontend
 
 ## Setup
 
@@ -93,13 +94,16 @@ cd log_ingestion_engine
    cp configs/.env.example .env
    ```
 
+All configuration is read from `.env` via `godotenv`; routing rules are defined with `ROUTING_RULES` in `.env`. No external JSON configuration file is used.
+
 Go dependencies resolve from `go.mod` automatically on the first build.
 
 ## Running
 
-1. `go run ./cmd/server`. The server listens on `HTTP_PORT` (default `8080`) and shuts down cleanly on interrupt.
-2. Confirm it is up with `curl -s -i localhost:8080`.
-3. Configuration auto-loading: The file path is `.env` in the working directory overridable with `CONFIG_FILE_PATH`; values already set in the environment always win.
+1. `go run ./cmd/server`. The server listens on `HTTP_PORT` (default `8080`) and exposes `POST /logs` and `GET /metrics.json`. It shuts down cleanly on interrupt.
+2. Confirm it is up with `curl -s -i localhost:8080/metrics.json`.
+3. Start the frontend: `cd frontend && npm install && npm run dev`. The Vite dev server proxies API calls to `localhost:8080` and serves the home page, dashboard and metrics. Set `VITE_API_BASE_URL` in `frontend/.env` to point at a different backend URL if needed.
+3. Configuration auto-loading: Settings are loaded from `.env` via `godotenv.Read(".env")`. Process environment overrides `.env`; no external configuration file is used.
 
 `cmd/server` is the composition root which builds the rate limiter, ingestion handler, pipeline workers, publisher, consumers, batch writer, SQLite store and dead-letter writer from the configuration, starts them as background work and stops them in order.
 
@@ -145,12 +149,13 @@ curl -i -X POST localhost:8080/logs -H 'Content-Type: application/json' \
   -d '[{"timestamp":"2026-10-24T10:00:00Z","service":"claims","level":"ERROR","message":"timeout"}]'
 ```
 
-Watch the logs arrive on the metrics page and the dashboard, both refreshed every five seconds:
+Watch the metrics snapshot in JSON:
 
 ```bash
 curl -s localhost:8080/metrics.json | python3 -m json.tool
-curl -si localhost:8080/dashboard >/dev/null   # 200 with the HTML dashboard
 ```
+
+Open the React frontend at `http://localhost:5173` (Vite dev server) for the home page, dashboard and metrics UI.
 
 Every status code per endpoint, the per-entry validation error shape and the metrics snapshot fields are specified in [`docs/api.md`](docs/api.md).
 
@@ -186,27 +191,30 @@ Two values are derived at snapshot time rather than stored:
 
 All counters are in memory and reset when the process restarts.
 
-`GET /metrics` serves a human-readable metrics page: every counter is shown as a plain number, with the logs grouped by level and by service, refreshed every five seconds.
-
 `GET /metrics.json` serves the same snapshot as JSON and refreshes `queue_backlog` on every request: the three `queue_service*` queues are summed from the RabbitMQ management API (`RABBITMQ_MGMT_URL/api/queues`, bounded by `METRICS_BACKLOG_TIMEOUT`, default `2s`) inside the configured virtual host (`RABBITMQ_VHOST`, default `/`), which is also the virtual host the service connects to.
 
 If the URL is unset or the API fails, a warning is logged and a local fallback counter, defined as messages published minus messages stored or released, floored at zero, is reported instead. The response shape is documented in [`docs/api.md`](docs/api.md).
 
-## Dashboard
+## Frontend
 
-`GET /dashboard` shows total logs, logs per second, error rate, queue backlog and the top five services by volume as plain numbers, refreshed every five seconds by polling `GET /metrics.json`.
-
-Throughput and error-rate history are kept client-side in the page and drawn with Chart.js 4.6.1, vendored at `internal/dashboard/static/js/chart.umd.js` and embedded. The page never loads a CDN and renders fully offline.
-
-Styling is Tailwind CSS compiled ahead of time. After editing `internal/dashboard/static/css/input.css`, the pages `internal/dashboard/index.html`, `internal/dashboard/root.html` or `internal/dashboard/metrics.html`, or the scripts `internal/dashboard/static/js/app.js` or `internal/dashboard/static/js/metrics.js`, regenerate and commit the stylesheet with:
+The React (TypeScript) + Vite frontend lives in [`frontend/`](frontend/) and is served separately from the Go backend. It connects to `GET /metrics/events` via server-sent events and renders metrics instantly whenever a counter changes.
 
 ```bash
-make dashboard-css
+cd frontend
+npm install
+npm run dev        # Vite dev server on http://localhost:5173
+npm run build      # production build to frontend/dist/
 ```
 
-The sources are listed with `@source` rules in `internal/dashboard/static/css/input.css`, so the stylesheet is regenerated whenever one of them changes.
+Configure the backend URL with `VITE_API_BASE_URL` in a `frontend/.env` file (defaults to `http://localhost:8080`):
 
-The target downloads the Tailwind v4.3.3 standalone CLI (linux-x64) into the git-ignored `bin/` on first use. No Node or npm required, and `go build` never depends on it.
+```bash
+echo "VITE_API_BASE_URL=http://localhost:8080" > frontend/.env
+```
+
+The frontend uses Tailwind CSS, Space Grotesk (from the Google Fonts CDN) and React Router for navigation. It charts throughput and error rate with Chart.js and renders the architecture diagram with Mermaid. Metrics stream live through server-sent events. The diagram source is [`frontend/public/architecture.mmd`](frontend/public/architecture.mmd).
+
+Styles are built by Vite with the `@tailwindcss/vite` plugin; `npm run build` produces `frontend/dist/`.
 
 ## Known limitations
 
@@ -214,8 +222,8 @@ The target downloads the Tailwind v4.3.3 standalone CLI (linux-x64) into the git
 - **Metrics are not persisted.** Counters, throughput and error-rate history reset when the process restarts. Logs themselves are durable: SQLite, the dead-letter file and the broker queues with their unacknowledged messages.
 - **No authentication on the ingestion API.** `POST /logs` is open to any caller; the only per-caller control is the per-IP rate limit, which is itself in-memory and single-instance.
 - **Credentials come from files and environment.** There is no secrets-manager integration; `RABBITMQ_USER` and `RABBITMQ_PASS` are read from `.env` or the process environment.
-- **No alerting.** There is nothing that pages anyone when a counter crosses a threshold; `/dashboard` and `/metrics` report the values, but any alerting is up to your monitoring stack.
-- **Dashboard renders offline, metrics do not always.** The dashboard never loads external assets, but `queue_backlog` is accurate only when the RabbitMQ management API is reachable; otherwise a local estimate is reported.
+- **No alerting.** There is nothing that pages anyone when a counter crosses a threshold; the dashboard reports the values, but any alerting is up to your monitoring stack.
+- **`queue_backlog` accuracy depends on the management API.** `queue_backlog` is accurate only when the RabbitMQ management API is reachable; otherwise a local estimate is reported.
 
 ## Tests
 

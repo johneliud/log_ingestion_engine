@@ -88,6 +88,7 @@ func openDestinationDatabase(databaseDirectoryPath string, databaseFileName stri
 	dataSourceQuery := url.Values{}
 	dataSourceQuery.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeoutInMilliseconds))
 	dataSourceQuery.Add("_pragma", "journal_mode(WAL)")
+	dataSourceQuery.Add("_pragma", "synchronous(FULL)")
 	dataSourceName := (&url.URL{Scheme: "file", Opaque: databasePath, RawQuery: dataSourceQuery.Encode()}).String()
 
 	database, openError := sql.Open("sqlite", dataSourceName)
