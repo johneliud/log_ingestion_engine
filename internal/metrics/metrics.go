@@ -233,7 +233,7 @@ func (metrics *Metrics) notify() {
 	}
 }
 
-// Sends the current snapshot to every subscriber when at least one metric has changed since the last broadcast. Slow subscribers are dropped.
+// Sends the current snapshot to every subscriber when at least one metric has changed since the last broadcast.
 func (metrics *Metrics) broadcastIfDirty() {
 	metrics.subscriberMu.Lock()
 	if !metrics.dirty.Load() || len(metrics.subscribers) == 0 {

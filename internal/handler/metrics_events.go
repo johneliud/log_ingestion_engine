@@ -56,15 +56,15 @@ func writeEvent(responseWriter http.ResponseWriter, flusher http.Flusher, snapsh
 	if encodeError != nil {
 		return encodeError
 	}
-	
+
 	if _, writeError := responseWriter.Write([]byte("data: ")); writeError != nil {
 		return writeError
 	}
-	
+
 	if _, writeError := responseWriter.Write(payload); writeError != nil {
 		return writeError
 	}
-	
+
 	if _, writeError := responseWriter.Write([]byte("\n\n")); writeError != nil {
 		return writeError
 	}
