@@ -402,11 +402,11 @@ func TestIntegration_SQLiteBatchingFlushesAtTheBatchSizeAndAtTheFlushInterval(t 
 
 	for _, batchingCase := range batchingCases {
 		t.Run(batchingCase.name, func(t *testing.T) {
-		applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
-		applicationConfiguration.WriteBatchSize = batchingCase.writeBatchSize
-		applicationConfiguration.WriteFlushInterval = batchingCase.writeFlushInterval
-		applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
-		serverApplication := newTestServerApplication(t, applicationConfiguration)
+			applicationConfiguration := integrationTestConfigurationWithoutBroker(t)
+			applicationConfiguration.WriteBatchSize = batchingCase.writeBatchSize
+			applicationConfiguration.WriteFlushInterval = batchingCase.writeFlushInterval
+			applicationConfiguration.RoutingRules = map[string]string{"claims": "service1"}
+			serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 			serviceNames := make([]string, 0, batchingCase.logCount)
 			for logIndex := 0; logIndex < batchingCase.logCount; logIndex++ {
