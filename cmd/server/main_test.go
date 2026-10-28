@@ -143,19 +143,6 @@ func countDeadLetterEntries(t *testing.T, deadLetterFilePath string) int {
 	return deadLetterEntryCount
 }
 
-// Writes the routing rules that send each service to its destination.
-func writeRoutingRules(t *testing.T, routingConfigurationFilePath string, routingRules map[string]string) {
-	t.Helper()
-
-	serializedRules, marshalError := json.Marshal(routingRules)
-	if marshalError != nil {
-		t.Fatalf("marshalling the routing rules failed: %v", marshalError)
-	}
-	if writeError := os.WriteFile(routingConfigurationFilePath, serializedRules, 0o644); writeError != nil {
-		t.Fatalf("writing the routing rules failed: %v", writeError)
-	}
-}
-
 // Returns one request body with a log entry for every service name.
 func logBatchBodyForServices(serviceNames []string) string {
 	logEntries := make([]string, 0, len(serviceNames))

@@ -409,7 +409,7 @@ func TestIntegration_SQLiteBatchingFlushesAtTheBatchSizeAndAtTheFlushInterval(t 
 			serverApplication := newTestServerApplication(t, applicationConfiguration)
 
 			serviceNames := make([]string, 0, batchingCase.logCount)
-			for logIndex := 0; logIndex < batchingCase.logCount; logIndex++ {
+			for range batchingCase.logCount {
 				serviceNames = append(serviceNames, "claims")
 			}
 			responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices(serviceNames))
@@ -437,7 +437,7 @@ func TestIntegration_RetriesAndDeadLettersTheLogsThatCannotBeStored(t *testing.T
 	}
 
 	serviceNames := make([]string, 0, 10)
-	for logIndex := 0; logIndex < 10; logIndex++ {
+	for range 10 {
 		serviceNames = append(serviceNames, "claims")
 	}
 	responseRecorder := serveRequest(serverApplication.requestRouter, http.MethodPost, "/logs", logBatchBodyForServices(serviceNames))

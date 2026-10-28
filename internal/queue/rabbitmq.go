@@ -179,7 +179,7 @@ func (publisher *Publisher) openPublishSessions(connection *amqp.Connection) (ch
 	}
 
 	sessions := make(chan *publishSession, publisher.publishSessionCount)
-	for sessionIndex := 0; sessionIndex < publisher.publishSessionCount; sessionIndex++ {
+	for sessionIndex := range publisher.publishSessionCount {
 		sessionChannel, channelError := connection.Channel()
 		if channelError != nil {
 			closePublishSessions(sessions)
@@ -342,7 +342,7 @@ func (publisher *Publisher) recordPublishedMessages(messageCount int) {
 	if publisher.metricsRecorder == nil {
 		return
 	}
-	for messageIndex := 0; messageIndex < messageCount; messageIndex++ {
+	for range make([]struct{}, messageCount) {
 		publisher.metricsRecorder.RecordQueueMessagePublished()
 	}
 }

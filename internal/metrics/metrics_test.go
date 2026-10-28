@@ -125,35 +125,30 @@ func TestMetrics_UpdatesAreSafeUnderConcurrency(t *testing.T) {
 	const logsPerGoroutine = 100
 
 	var waitGroup sync.WaitGroup
-	waitGroup.Add(goroutineCount * 4)
 
 	for range goroutineCount {
-		go func() {
-			defer waitGroup.Done()
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordLogsReceived([]model.LogEntry{
 					{Service: "claims", Level: model.LogLevelInfo},
 				})
 			}
-		}()
-		go func() {
-			defer waitGroup.Done()
+		})
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordRateLimitedRequest()
 			}
-		}()
-		go func() {
-			defer waitGroup.Done()
+		})
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordDeadLetteredLog()
 			}
-		}()
-		go func() {
-			defer waitGroup.Done()
+		})
+		waitGroup.Go(func() {
 			for range logsPerGoroutine {
 				metricsRegistry.RecordWriteFailure()
 			}
-		}()
+		})
 	}
 
 	waitGroup.Wait()

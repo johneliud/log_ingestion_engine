@@ -24,14 +24,12 @@ func NewServiceRouter(rules map[string]string, defaultDestination string) (*Serv
 		return nil, fmt.Errorf("unknown default destination %q", defaultDestination)
 	}
 
-	if rules != nil {
-		for serviceName, destinationName := range rules {
-			dest := model.Destination(destinationName)
-			if !isValidDestination(dest) {
-				return nil, fmt.Errorf("unknown destination %q for service %q", destinationName, serviceName)
-			}
-			routingRules[serviceName] = dest
+	for serviceName, destinationName := range rules {
+		dest := model.Destination(destinationName)
+		if !isValidDestination(dest) {
+			return nil, fmt.Errorf("unknown destination %q for service %q", destinationName, serviceName)
 		}
+		routingRules[serviceName] = dest
 	}
 
 	return &ServiceRouter{rules: routingRules, defaultDestination: defaultDestinationValue}, nil

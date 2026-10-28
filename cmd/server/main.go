@@ -29,9 +29,6 @@ import (
 
 const minimumRateLimiterIdleTimeout = time.Second
 
-// The delay between two attempts to push a spooled chunk into a full pipeline.
-const replayRetryDelay = 50 * time.Millisecond
-
 // Names one background component and the channel that reports when it stops.
 type backgroundWork struct {
 	name       string

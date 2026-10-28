@@ -400,51 +400,6 @@ func parsePositiveIntegerSetting(environmentVariables map[string]string, setting
 	return parsedSettingValue, nil
 }
 
-// Returns the duration for the setting, falling back to the default when empty and rejecting non-positive values.
-func parsePositiveDurationSetting(environmentVariables map[string]string, settingName string, defaultValue time.Duration) (time.Duration, error) {
-	rawSettingValue := environmentVariables[settingName]
-	if rawSettingValue == "" {
-		return defaultValue, nil
-	}
-
-	parsedSettingValue, parsingError := time.ParseDuration(rawSettingValue)
-	if parsingError != nil {
-		return 0, fmt.Errorf("environment variable %s has value %q, which is not a valid duration: %w", settingName, rawSettingValue, parsingError)
-	}
-
-	if parsedSettingValue <= 0 {
-		return 0, fmt.Errorf("environment variable %s must be a positive duration, but shows %q", settingName, rawSettingValue)
-	}
-	return parsedSettingValue, nil
-}
-
-// Returns the comma-separated durations for the setting, falling back to the default when empty and rejecting non-positive entries.
-func parsePositiveDurationListSetting(environmentVariables map[string]string, settingName string, defaultValue []time.Duration) ([]time.Duration, error) {
-	rawSettingValue := environmentVariables[settingName]
-	if rawSettingValue == "" {
-		return defaultValue, nil
-	}
-
-	parsedSettingValues := make([]time.Duration, 0)
-	for rawSettingEntry := range strings.SplitSeq(rawSettingValue, ",") {
-		trimmedSettingEntry := strings.TrimSpace(rawSettingEntry)
-		if trimmedSettingEntry == "" {
-			continue
-		}
-		parsedSettingEntry, parsingError := time.ParseDuration(trimmedSettingEntry)
-		if parsingError != nil {
-			return nil, fmt.Errorf("environment variable %s contains value %q, which is not a valid duration: %w", settingName, trimmedSettingEntry, parsingError)
-		}
-
-		if parsedSettingEntry <= 0 {
-			return nil, fmt.Errorf("environment variable %s must contain only positive durations, but includes %q", settingName, trimmedSettingEntry)
-		}
-
-		parsedSettingValues = append(parsedSettingValues, parsedSettingEntry)
-	}
-	return parsedSettingValues, nil
-}
-
 // Returns the string for the setting and an error naming the variable when it is missing or empty.
 func parseRequiredStringSetting(environmentVariables map[string]string, settingName string) (string, error) {
 	settingValue := environmentVariables[settingName]

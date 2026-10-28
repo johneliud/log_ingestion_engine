@@ -187,9 +187,7 @@ func TestRawLogsQueue_ReceiveFreesCapacityForABlockedProducer(t *testing.T) {
 	producerResult := make(chan error, 1)
 	go func() { producerResult <- queue.PushBatch([]model.RawLog{{BatchID: "new"}}) }()
 
-	applicationContext, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if rawLog, queueOpen := queue.Receive(applicationContext); !queueOpen || rawLog.BatchID != "queued" {
+	if rawLog, queueOpen := queue.Receive(t.Context()); !queueOpen || rawLog.BatchID != "queued" {
 		t.Fatalf("expected the queued log, got %+v (open=%v)", rawLog, queueOpen)
 	}
 
@@ -211,7 +209,7 @@ func TestRawLogsQueue_ReceiveStopsWhenTheContextIsCancelledOnAnEmptyQueue(t *tes
 	t.Parallel()
 	queue := NewRawLogsQueue(1, time.Second)
 
-	applicationContext, cancel := context.WithCancel(context.Background())
+	applicationContext, cancel := context.WithCancel(t.Context())
 	receiveCompleted := make(chan bool, 1)
 	go func() {
 		_, queueOpen := queue.Receive(applicationContext)
@@ -318,7 +316,7 @@ func TestRawLogsQueue_PushBatchWhenCapacityFreesStopsWhenTheContextIsCancelled(t
 		t.Fatalf("filling the queue failed: %v", pushError)
 	}
 
-	applicationContext, cancelApplication := context.WithCancel(context.Background())
+	applicationContext, cancelApplication := context.WithCancel(t.Context())
 	cancelApplication()
 	pushError := queue.PushBatchWhenCapacityFrees(applicationContext, []model.RawLog{{LogID: "replayed"}})
 	if !errors.Is(pushError, context.Canceled) {

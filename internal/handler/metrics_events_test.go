@@ -66,6 +66,9 @@ func readStreamedSnapshots(t *testing.T, streamURL string, readDeadline time.Dur
 			}
 			decodedSnapshots <- snapshot
 		}
+		if scanErr := lineScanner.Err(); scanErr != nil {
+			return
+		}
 	}()
 
 	snapshots := make([]metrics.Snapshot, 0)

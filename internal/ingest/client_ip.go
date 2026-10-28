@@ -16,8 +16,11 @@ func ResolveClientIP(request *http.Request, trustedProxies []string) string {
 	sourceIPAddress := chooseSocketAddressHost(request)
 
 	if forwardedHeader := request.Header.Get("X-Forwarded-For"); forwardedHeader != "" && hasForwardedFromTrustedProxy(request, trustedProxies) {
-		forwardedEntries := strings.Split(forwardedHeader, ",")
-		firstEntry := strings.TrimSpace(forwardedEntries[0])
+		firstEntry := ""
+		for entry := range strings.SplitSeq(forwardedHeader, ",") {
+			firstEntry = strings.TrimSpace(entry)
+			break
+		}
 		if parsedAddress, parseError := netip.ParseAddr(firstEntry); parseError == nil {
 			sourceIPAddress = parsedAddress.String()
 		}

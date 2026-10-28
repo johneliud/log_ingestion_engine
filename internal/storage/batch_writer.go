@@ -272,7 +272,7 @@ func (batchWriter *BatchWriter) recordStoredMessages(storedMessageCount int) {
 	if batchWriter.metricsRecorder == nil {
 		return
 	}
-	for storedMessageIndex := 0; storedMessageIndex < storedMessageCount; storedMessageIndex++ {
+	for range make([]struct{}, storedMessageCount) {
 		batchWriter.metricsRecorder.RecordQueueMessageStored()
 	}
 }

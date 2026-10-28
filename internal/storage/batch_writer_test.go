@@ -316,7 +316,7 @@ func TestBatchWriter_RetriesAtConfiguredBackoffIntervalsAndTracksRetryCount(t *t
 
 	expectedAttemptCount := 4
 	var lastAttemptedBatch []model.EnrichedLog
-	for attemptIndex := 0; attemptIndex < expectedAttemptCount; attemptIndex++ {
+	for attemptIndex := range expectedAttemptCount {
 		select {
 		case lastAttemptedBatch = <-attemptedBatches:
 		case <-time.After(2 * time.Second):
