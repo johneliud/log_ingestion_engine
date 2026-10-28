@@ -3,6 +3,7 @@ package metrics
 import (
 	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johneliud/log_ingestion_engine/internal/model"
@@ -24,6 +25,7 @@ type Snapshot struct {
 const (
 	defaultThroughputWindow = time.Minute
 	maximumThroughputWindow = time.Hour
+	broadcastInterval       = 200 * time.Millisecond
 )
 
 // Owns every metric counter and the sliding throughput window used to compute logs per second.
@@ -42,6 +44,12 @@ type Metrics struct {
 	lastThroughputTime    time.Time
 	hasRecordedThroughput bool
 	currentTimeProvider   func() time.Time
+
+	subscribers    map[chan Snapshot]struct{}
+	subscriberMu   sync.Mutex
+	dirty          atomic.Bool
+	changeNotifier chan struct{}
+	broadcastDone  chan struct{}
 }
 
 // Returns a metrics registry whose throughput window matches the configured duration.
@@ -55,7 +63,7 @@ func NewMetrics(throughputWindow time.Duration, currentTimeProvider func() time.
 	if currentTimeProvider == nil {
 		currentTimeProvider = time.Now
 	}
-	return &Metrics{
+	m := &Metrics{
 		logsByLevel:           make(map[model.LogLevel]uint64),
 		logsByService:         make(map[string]uint64),
 		throughputWindow:      throughputWindow,
@@ -63,7 +71,13 @@ func NewMetrics(throughputWindow time.Duration, currentTimeProvider func() time.
 		lastThroughputTime:    time.Time{},
 		hasRecordedThroughput: false,
 		currentTimeProvider:   currentTimeProvider,
+		subscribers:           make(map[chan Snapshot]struct{}),
+		changeNotifier:        make(chan struct{}, 1),
+		broadcastDone:         make(chan struct{}),
 	}
+
+	go m.broadcastLoop()
+	return m
 }
 
 // Records one accepted log, incrementing the total, level, service and throughput counters.
@@ -79,6 +93,8 @@ func (metrics *Metrics) RecordLogsReceived(logs []model.LogEntry) {
 
 	metrics.advanceThroughputWindowTo(metrics.currentTimeProvider())
 	metrics.throughputWindowLogs += uint64(len(logs))
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Records one request rejected by the rate limiter.
@@ -86,6 +102,8 @@ func (metrics *Metrics) RecordRateLimitedRequest() {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
 	metrics.rateLimitedRequests++
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Records one log that exhausted every storage retry and was dead-lettered.
@@ -93,6 +111,8 @@ func (metrics *Metrics) RecordDeadLetteredLog() {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
 	metrics.deadLetteredLogs++
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Records one failed durable write attempt.
@@ -100,6 +120,8 @@ func (metrics *Metrics) RecordWriteFailure() {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
 	metrics.writeFailures++
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Updates the queue backlog count sourced from the RabbitMQ management API.
@@ -107,6 +129,8 @@ func (metrics *Metrics) SetQueueBacklog(backlog int) {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
 	metrics.queueBacklog = backlog
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Records one message handed to the broker or the in-memory fallback, raising the in-flight backlog estimate.
@@ -114,6 +138,8 @@ func (metrics *Metrics) RecordQueueMessagePublished() {
 	metrics.mutex.Lock()
 	defer metrics.mutex.Unlock()
 	metrics.fallbackQueueBacklog++
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Records one message stored by a consumer, lowering the in-flight backlog estimate.
@@ -123,6 +149,8 @@ func (metrics *Metrics) RecordQueueMessageStored() {
 	if metrics.fallbackQueueBacklog > 0 {
 		metrics.fallbackQueueBacklog--
 	}
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Records one message that left the pipeline without being stored, such as a dead-lettered log, lowering the in-flight backlog estimate.
@@ -132,6 +160,8 @@ func (metrics *Metrics) RecordQueueMessageReleased() {
 	if metrics.fallbackQueueBacklog > 0 {
 		metrics.fallbackQueueBacklog--
 	}
+	metrics.dirty.Store(true)
+	metrics.notify()
 }
 
 // Returns the local backlog estimate reported when the management API cannot be reached.
@@ -175,6 +205,70 @@ func (metrics *Metrics) Snapshot() Snapshot {
 		RateLimitedRequests: metrics.rateLimitedRequests,
 		DeadLetteredLogs:    metrics.deadLetteredLogs,
 		WriteFailures:       metrics.writeFailures,
+	}
+}
+
+// Returns a channel that receives a snapshot whenever any metric changes.
+func (metrics *Metrics) Subscribe() chan Snapshot {
+	ch := make(chan Snapshot, 1)
+	metrics.subscriberMu.Lock()
+	metrics.subscribers[ch] = struct{}{}
+	metrics.subscriberMu.Unlock()
+	return ch
+}
+
+// Removes a subscriber channel and closes it.
+func (metrics *Metrics) Unsubscribe(ch chan Snapshot) {
+	metrics.subscriberMu.Lock()
+	delete(metrics.subscribers, ch)
+	metrics.subscriberMu.Unlock()
+	close(ch)
+}
+
+// Signals the broadcast loop that a metric changed. It is non-blocking.
+func (metrics *Metrics) notify() {
+	select {
+	case metrics.changeNotifier <- struct{}{}:
+	default:
+	}
+}
+
+// Sends the current snapshot to every subscriber when at least one metric has changed since the last broadcast. Slow subscribers are dropped.
+func (metrics *Metrics) broadcastIfDirty() {
+	metrics.subscriberMu.Lock()
+	if !metrics.dirty.Load() || len(metrics.subscribers) == 0 {
+		metrics.dirty.Store(false)
+		metrics.subscriberMu.Unlock()
+		return
+	}
+	metrics.dirty.Store(false)
+	subscribers := make([]chan Snapshot, 0, len(metrics.subscribers))
+	for ch := range metrics.subscribers {
+		subscribers = append(subscribers, ch)
+	}
+	metrics.subscriberMu.Unlock()
+
+	snapshot := metrics.Snapshot()
+	for _, ch := range subscribers {
+		select {
+		case ch <- snapshot:
+		default:
+		}
+	}
+}
+
+// Ticks on an interval and on every change notification, sending the current snapshot to all subscribers.
+func (metrics *Metrics) broadcastLoop() {
+	defer close(metrics.broadcastDone)
+	ticker := time.NewTicker(broadcastInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			metrics.broadcastIfDirty()
+		case <-metrics.changeNotifier:
+			metrics.broadcastIfDirty()
+		}
 	}
 }
 
