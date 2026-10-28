@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  color: #0f172a;
+  background-color: #ffffff;
+}
+
+.font-sans {
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Mermaid diagram sizing */
+.mermaid {
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+}
+
+[data-mermaid="true"] svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
