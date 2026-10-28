@@ -18,7 +18,7 @@ type router interface {
 }
 
 type queuePublisher interface {
-	Publish(enrichedLog model.EnrichedLog) error
+	PublishBatch(enrichedLogs []model.EnrichedLog) error
 }
 
 // Records a log that could not be processed so it is not lost.
@@ -26,7 +26,7 @@ type deadLetterSink func(deadLetterEntry model.DeadLetterEntry) error
 
 // Supplies the queue, the worker settings and the processing steps of a batch consumer.
 type BatchConsumerDependencies struct {
-	RawLogsChannel      <-chan model.RawLog
+	RawLogsQueue        *RawLogsQueue
 	ConsumerBatchSize   int
 	WorkerCount         int
 	Enricher            enricher
@@ -39,7 +39,7 @@ type BatchConsumerDependencies struct {
 
 // Consumes batches from raw logs, enriches, routes, and publishes.
 type BatchConsumer struct {
-	rawLogsChannel      <-chan model.RawLog
+	rawLogsQueue        *RawLogsQueue
 	consumerBatchSize   int
 	enricher            enricher
 	router              router
@@ -58,7 +58,7 @@ func NewBatchConsumer(dependencies BatchConsumerDependencies) *BatchConsumer {
 	}
 
 	return &BatchConsumer{
-		rawLogsChannel:      dependencies.RawLogsChannel,
+		rawLogsQueue:        dependencies.RawLogsQueue,
 		consumerBatchSize:   dependencies.ConsumerBatchSize,
 		enricher:            dependencies.Enricher,
 		router:              dependencies.Router,
@@ -70,7 +70,7 @@ func NewBatchConsumer(dependencies BatchConsumerDependencies) *BatchConsumer {
 	}
 }
 
-// Starts workers that process batches until context is done and channel is drained.
+// Starts workers that process batches until context is done and the queue is drained.
 func (batchConsumer *BatchConsumer) Start(applicationContext context.Context) <-chan struct{} {
 	completed := make(chan struct{})
 	var waitGroup sync.WaitGroup
@@ -79,20 +79,14 @@ func (batchConsumer *BatchConsumer) Start(applicationContext context.Context) <-
 		go func() {
 			defer waitGroup.Done()
 			for {
-				batch := batchConsumer.collectBatch()
+				batch, queueOpen := batchConsumer.collectBatch(applicationContext)
+				if !queueOpen {
+					return
+				}
 				if len(batch) == 0 {
-					select {
-					case <-applicationContext.Done():
-						return
-					default:
-						time.Sleep(10 * time.Millisecond)
-						continue
-					}
+					continue
 				}
-
-				for _, rawLog := range batch {
-					batchConsumer.processRawLog(rawLog)
-				}
+				batchConsumer.processBatch(batch)
 			}
 		}()
 	}
@@ -103,23 +97,29 @@ func (batchConsumer *BatchConsumer) Start(applicationContext context.Context) <-
 	return completed
 }
 
-// Enriches, routes and publishes one raw log, dead-lettering it when a step fails.
-func (batchConsumer *BatchConsumer) processRawLog(rawLog model.RawLog) {
-	enrichedLog := batchConsumer.enricher.Enrich(rawLog)
-	routedLog, routeError := batchConsumer.router.Route(enrichedLog)
-	if routeError != nil {
-		slog.Error("routing log failed", "error", routeError, "batch_id", enrichedLog.BatchID, "service", enrichedLog.Service)
-		enrichedLog.Destination = batchConsumer.defaultDestinationOrFallback()
-		batchConsumer.deadLetterUnprocessedLog(enrichedLog, routeError.Error())
-		return
+// Enriches, routes and publishes one batch of raw logs, dead-lettering the logs that fail either step.
+func (batchConsumer *BatchConsumer) processBatch(batch []model.RawLog) {
+	publishableLogs := make([]model.EnrichedLog, 0, len(batch))
+	for _, rawLog := range batch {
+		enrichedLog := batchConsumer.enricher.Enrich(rawLog)
+		routedLog, routeError := batchConsumer.router.Route(enrichedLog)
+		if routeError != nil {
+			slog.Error("routing log failed", "error", routeError, "batch_id", enrichedLog.BatchID, "service", enrichedLog.Service)
+			enrichedLog.Destination = batchConsumer.defaultDestinationOrFallback()
+			batchConsumer.deadLetterUnprocessedLog(enrichedLog, routeError.Error())
+			continue
+		}
+		publishableLogs = append(publishableLogs, routedLog)
 	}
 
-	if batchConsumer.queuePublisher == nil {
+	if batchConsumer.queuePublisher == nil || len(publishableLogs) == 0 {
 		return
 	}
-	if publishError := batchConsumer.queuePublisher.Publish(routedLog); publishError != nil {
-		slog.Error("publishing log failed", "error", publishError, "batch_id", routedLog.BatchID, "service", routedLog.Service)
-		batchConsumer.deadLetterUnprocessedLog(routedLog, publishError.Error())
+	if publishError := batchConsumer.queuePublisher.PublishBatch(publishableLogs); publishError != nil {
+		slog.Error("publishing logs failed", "error", publishError, "log_count", len(publishableLogs))
+		for _, routedLog := range publishableLogs {
+			batchConsumer.deadLetterUnprocessedLog(routedLog, publishError.Error())
+		}
 	}
 }
 
@@ -147,21 +147,21 @@ func (batchConsumer *BatchConsumer) deadLetterUnprocessedLog(enrichedLog model.E
 	}
 }
 
-func (batchConsumer *BatchConsumer) collectBatch() []model.RawLog {
-	batch := make([]model.RawLog, 0, batchConsumer.consumerBatchSize)
-	for len(batch) < batchConsumer.consumerBatchSize {
-		select {
-		case rawLog, channelOpen := <-batchConsumer.rawLogsChannel:
-			if !channelOpen {
-				return batch
-			}
-			batch = append(batch, rawLog)
-		default:
-			if len(batch) > 0 {
-				return batch
-			}
-			return batch
-		}
+// Blocks until at least one raw log is available, then gathers up to the consumer batch size without blocking.
+func (batchConsumer *BatchConsumer) collectBatch(applicationContext context.Context) ([]model.RawLog, bool) {
+	firstRawLog, queueOpen := batchConsumer.rawLogsQueue.Receive(applicationContext)
+	if !queueOpen {
+		return nil, false
 	}
-	return batch
+
+	batch := make([]model.RawLog, 0, batchConsumer.consumerBatchSize)
+	batch = append(batch, firstRawLog)
+	for len(batch) < batchConsumer.consumerBatchSize {
+		nextRawLog, hasMore := batchConsumer.rawLogsQueue.TryReceive()
+		if !hasMore {
+			break
+		}
+		batch = append(batch, nextRawLog)
+	}
+	return batch, true
 }

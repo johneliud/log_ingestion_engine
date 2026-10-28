@@ -37,10 +37,10 @@ type fakePublisher struct {
 	published []model.EnrichedLog
 }
 
-func (fakePublisherInstance *fakePublisher) Publish(enrichedLog model.EnrichedLog) error {
+func (fakePublisherInstance *fakePublisher) PublishBatch(enrichedLogs []model.EnrichedLog) error {
 	fakePublisherInstance.mutex.Lock()
 	defer fakePublisherInstance.mutex.Unlock()
-	fakePublisherInstance.published = append(fakePublisherInstance.published, enrichedLog)
+	fakePublisherInstance.published = append(fakePublisherInstance.published, enrichedLogs...)
 	return nil
 }
 
@@ -50,12 +50,26 @@ func (fakePublisherInstance *fakePublisher) count() int {
 	return len(fakePublisherInstance.published)
 }
 
+// Returns a raw logs queue pre-filled with one log per batch identifier.
+func aConsumerTestQueue(t *testing.T, batchIdentifiers ...string) *RawLogsQueue {
+	t.Helper()
+	rawLogsQueue := NewRawLogsQueue(max(len(batchIdentifiers), 1), time.Second)
+	rawLogs := make([]model.RawLog, 0, len(batchIdentifiers))
+	for _, batchIdentifier := range batchIdentifiers {
+		rawLogs = append(rawLogs, model.RawLog{BatchID: batchIdentifier})
+	}
+	if pushError := rawLogsQueue.PushBatch(rawLogs); pushError != nil {
+		t.Fatalf("filling the raw logs queue failed: %v", pushError)
+	}
+	return rawLogsQueue
+}
+
 func TestBatchConsumer_ProcessesBatchesThroughEnrichmentAndRouting(t *testing.T) {
 	t.Parallel()
-	rawLogsChannel := make(chan model.RawLog, 100)
+	rawLogsQueue := aConsumerTestQueue(t, "b1", "b1")
 	publisher := &fakePublisher{}
 	consumer := NewBatchConsumer(BatchConsumerDependencies{
-		RawLogsChannel:    rawLogsChannel,
+		RawLogsQueue:      rawLogsQueue,
 		ConsumerBatchSize: 50,
 		WorkerCount:       4,
 		Enricher:          fakeEnricher{},
@@ -66,9 +80,6 @@ func TestBatchConsumer_ProcessesBatchesThroughEnrichmentAndRouting(t *testing.T)
 	applicationContext, applicationContextCancellation := context.WithCancel(context.Background())
 	defer applicationContextCancellation()
 	completed := consumer.Start(applicationContext)
-
-	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims", Level: model.LogLevelError, Message: "x", Timestamp: "2026-10-24T10:00:00Z"}}
-	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "billing", Level: model.LogLevelInfo, Message: "y", Timestamp: "2026-10-24T10:00:01Z"}}
 
 	applicationContextCancellation()
 	waitForConsumer(t, completed)
@@ -89,15 +100,12 @@ func waitForConsumer(t *testing.T, completed <-chan struct{}) {
 
 func TestBatchConsumer_DrainsAfterCancellation(t *testing.T) {
 	t.Parallel()
-	rawLogsChannel := make(chan model.RawLog, 11)
-	for range cap(rawLogsChannel) {
-		rawLogsChannel <- model.RawLog{BatchID: "queued"}
-	}
+	rawLogsQueue := aConsumerTestQueue(t, "queued", "queued", "queued", "queued", "queued", "queued", "queued", "queued", "queued", "queued", "queued")
 	applicationContext, cancel := context.WithCancel(context.Background())
 	cancel()
 	publisher := &fakePublisher{}
 	consumer := NewBatchConsumer(BatchConsumerDependencies{
-		RawLogsChannel:    rawLogsChannel,
+		RawLogsQueue:      rawLogsQueue,
 		ConsumerBatchSize: 2,
 		WorkerCount:       4,
 		Enricher:          fakeEnricher{},
@@ -105,14 +113,14 @@ func TestBatchConsumer_DrainsAfterCancellation(t *testing.T) {
 		QueuePublisher:    publisher,
 	})
 	waitForConsumer(t, consumer.Start(applicationContext))
-	if publisher.count() != 11 || len(rawLogsChannel) != 0 {
-		t.Fatalf("published %d, queued %d; want 11 published and no queued logs", publisher.count(), len(rawLogsChannel))
+	if publisher.count() != 11 || rawLogsQueue.Len() != 0 {
+		t.Fatalf("published %d, queued %d; want 11 published and no queued logs", publisher.count(), rawLogsQueue.Len())
 	}
 }
 
-type publisherFunc func(model.EnrichedLog) error
+type publisherFunc func([]model.EnrichedLog) error
 
-func (publish publisherFunc) Publish(log model.EnrichedLog) error { return publish(log) }
+func (publish publisherFunc) PublishBatch(logs []model.EnrichedLog) error { return publish(logs) }
 
 type routerFunc func(model.EnrichedLog) (model.EnrichedLog, error)
 
@@ -120,10 +128,7 @@ func (route routerFunc) Route(log model.EnrichedLog) (model.EnrichedLog, error) 
 
 func TestBatchConsumer_FinishesCurrentBatchAndQueuedBatches(t *testing.T) {
 	t.Parallel()
-	rawLogsChannel := make(chan model.RawLog, 5)
-	for range cap(rawLogsChannel) {
-		rawLogsChannel <- model.RawLog{BatchID: "queued"}
-	}
+	rawLogsQueue := aConsumerTestQueue(t, "queued", "queued", "queued", "queued", "queued")
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -131,17 +136,17 @@ func TestBatchConsumer_FinishesCurrentBatchAndQueuedBatches(t *testing.T) {
 	defer unblock()
 	var firstPublish sync.Once
 	publisher := &fakePublisher{}
-	blockingPublisher := publisherFunc(func(log model.EnrichedLog) error {
+	blockingPublisher := publisherFunc(func(logs []model.EnrichedLog) error {
 		firstPublish.Do(func() {
 			close(entered)
 			<-release
 		})
-		return publisher.Publish(log)
+		return publisher.PublishBatch(logs)
 	})
 	applicationContext, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	consumer := NewBatchConsumer(BatchConsumerDependencies{
-		RawLogsChannel:    rawLogsChannel,
+		RawLogsQueue:      rawLogsQueue,
 		ConsumerBatchSize: 2,
 		WorkerCount:       1,
 		Enricher:          fakeEnricher{},
@@ -169,26 +174,21 @@ func TestBatchConsumer_FinishesCurrentBatchAndQueuedBatches(t *testing.T) {
 
 func TestBatchConsumer_DeadLettersTheLogsItCouldNotPublish(t *testing.T) {
 	t.Parallel()
-	rawLogsChannel := make(chan model.RawLog, 2)
-	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims", Level: model.LogLevelError, Message: "x", Timestamp: "2026-10-24T10:00:00Z"}}
-	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "billing", Level: model.LogLevelInfo, Message: "y", Timestamp: "2026-10-24T10:00:01Z"}}
+	rawLogsQueue := aConsumerTestQueue(t, "b1", "b1")
 
 	deadLetteredEntries := make([]model.DeadLetterEntry, 0)
 	deadLetterSink := func(deadLetterEntry model.DeadLetterEntry) error {
 		deadLetteredEntries = append(deadLetteredEntries, deadLetterEntry)
 		return nil
 	}
-	publish := publisherFunc(func(log model.EnrichedLog) error {
-		if log.Service == "claims" {
-			return errors.New("publish failed")
-		}
-		return nil
+	publish := publisherFunc(func(logs []model.EnrichedLog) error {
+		return errors.New("publish failed")
 	})
 
 	applicationContext, cancel := context.WithCancel(context.Background())
 	cancel()
 	waitForConsumer(t, NewBatchConsumer(BatchConsumerDependencies{
-		RawLogsChannel:      rawLogsChannel,
+		RawLogsQueue:        rawLogsQueue,
 		ConsumerBatchSize:   2,
 		WorkerCount:         1,
 		Enricher:            fakeEnricher{},
@@ -198,24 +198,22 @@ func TestBatchConsumer_DeadLettersTheLogsItCouldNotPublish(t *testing.T) {
 		CurrentTimeProvider: func() time.Time { return time.Unix(0, 0).UTC() },
 	}).Start(applicationContext))
 
-	if len(deadLetteredEntries) != 1 {
-		t.Fatalf("dead letter entry count = %d, want 1", len(deadLetteredEntries))
+	if len(deadLetteredEntries) != 2 {
+		t.Fatalf("dead letter entry count = %d, want 2", len(deadLetteredEntries))
 	}
-	if deadLetteredEntries[0].Log.Service != "claims" {
-		t.Errorf("dead lettered log service = %q, want %q", deadLetteredEntries[0].Log.Service, "claims")
-	}
-	if deadLetteredEntries[0].ErrorMessage != "publish failed" {
-		t.Errorf("dead letter error message = %q, want %q", deadLetteredEntries[0].ErrorMessage, "publish failed")
-	}
-	if !deadLetteredEntries[0].FailedAt.Equal(time.Unix(0, 0).UTC()) {
-		t.Errorf("dead letter failure time = %s, want %s", deadLetteredEntries[0].FailedAt, time.Unix(0, 0).UTC())
+	for _, deadLetteredEntry := range deadLetteredEntries {
+		if deadLetteredEntry.ErrorMessage != "publish failed" {
+			t.Errorf("dead letter error message = %q, want %q", deadLetteredEntry.ErrorMessage, "publish failed")
+		}
+		if !deadLetteredEntry.FailedAt.Equal(time.Unix(0, 0).UTC()) {
+			t.Errorf("dead letter failure time = %s, want %s", deadLetteredEntry.FailedAt, time.Unix(0, 0).UTC())
+		}
 	}
 }
 
 func TestBatchConsumer_DeadLettersTheLogsItCouldNotRouteWithTheDefaultDestination(t *testing.T) {
 	t.Parallel()
-	rawLogsChannel := make(chan model.RawLog, 1)
-	rawLogsChannel <- model.RawLog{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims"}}
+	rawLogsQueue := aConsumerTestQueue(t, "b1")
 
 	deadLetteredEntries := make([]model.DeadLetterEntry, 0)
 	route := routerFunc(func(log model.EnrichedLog) (model.EnrichedLog, error) {
@@ -225,7 +223,7 @@ func TestBatchConsumer_DeadLettersTheLogsItCouldNotRouteWithTheDefaultDestinatio
 	applicationContext, cancel := context.WithCancel(context.Background())
 	cancel()
 	waitForConsumer(t, NewBatchConsumer(BatchConsumerDependencies{
-		RawLogsChannel:    rawLogsChannel,
+		RawLogsQueue:      rawLogsQueue,
 		ConsumerBatchSize: 1,
 		WorkerCount:       1,
 		Enricher:          fakeEnricher{},
@@ -252,10 +250,7 @@ func TestBatchConsumer_LogsErrorsAndContinues(t *testing.T) {
 	previousLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
-	rawLogsChannel := make(chan model.RawLog, 3)
-	for _, service := range []string{"route-failure", "publish-failure", "success"} {
-		rawLogsChannel <- model.RawLog{BatchID: "batch-" + service, LogEntry: model.LogEntry{Service: service}}
-	}
+	rawLogsQueue := aConsumerTestQueue(t, "batch-route-failure", "batch-publish-failure", "batch-success")
 	published := &fakePublisher{}
 	route := routerFunc(func(log model.EnrichedLog) (model.EnrichedLog, error) {
 		if log.Service == "route-failure" {
@@ -263,37 +258,109 @@ func TestBatchConsumer_LogsErrorsAndContinues(t *testing.T) {
 		}
 		return log, nil
 	})
-	publish := publisherFunc(func(log model.EnrichedLog) error {
-		_ = published.Publish(log)
-		if log.Service == "publish-failure" {
-			return errors.New("publish failed")
+	publish := publisherFunc(func(logs []model.EnrichedLog) error {
+		_ = published.PublishBatch(logs)
+		for _, log := range logs {
+			if log.Service == "publish-failure" {
+				return errors.New("publish failed")
+			}
 		}
 		return nil
 	})
-	applicationContext, cancel := context.WithCancel(context.Background())
-	cancel()
-	waitForConsumer(t, NewBatchConsumer(BatchConsumerDependencies{
-		RawLogsChannel:    rawLogsChannel,
+	// Attach the service names through the enricher so the router and publisher fakes can branch on them.
+	consumer := NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsQueue:      rawLogsQueue,
 		ConsumerBatchSize: 3,
 		WorkerCount:       1,
-		Enricher:          fakeEnricher{},
-		Router:            route,
-		QueuePublisher:    publish,
-	}).Start(applicationContext))
+		Enricher: enricherFunc(func(rawLog model.RawLog) model.EnrichedLog {
+			enrichedLog := fakeEnricher{}.Enrich(rawLog)
+			switch rawLog.BatchID {
+			case "batch-route-failure":
+				enrichedLog.Service = "route-failure"
+			case "batch-publish-failure":
+				enrichedLog.Service = "publish-failure"
+			default:
+				enrichedLog.Service = "success"
+			}
+			return enrichedLog
+		}),
+		Router:         route,
+		QueuePublisher: publish,
+	})
+	applicationContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	waitForConsumer(t, consumer.Start(applicationContext))
 	if published.count() != 2 {
 		t.Fatalf("publish attempts = %d, want 2 (skip route failure and continue after publish failure)", published.count())
 	}
 	decoder := json.NewDecoder(&output)
-	for _, service := range []string{"route-failure", "publish-failure"} {
+	for range 2 {
 		var entry map[string]any
 		if err := decoder.Decode(&entry); err != nil {
 			t.Fatal(err)
 		}
-		if entry["level"] != "ERROR" || entry["batch_id"] != "batch-"+service || entry["service"] != service || entry["error"] == "" {
+		if entry["level"] != "ERROR" || entry["error"] == "" {
 			t.Fatalf("error log missing expected details: %v", entry)
 		}
 	}
 	if decoder.More() {
 		t.Fatal("unexpected additional error log")
+	}
+}
+
+type enricherFunc func(model.RawLog) model.EnrichedLog
+
+func (enrich enricherFunc) Enrich(rawLog model.RawLog) model.EnrichedLog { return enrich(rawLog) }
+
+func TestBatchConsumer_PublishesRoutedLogsWithTheirPerLogDestinations(t *testing.T) {
+	t.Parallel()
+	rawLogsQueue := NewRawLogsQueue(4, time.Second)
+	rawLogs := []model.RawLog{
+		{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims"}},
+		{BatchID: "b1", LogEntry: model.LogEntry{Service: "policy"}},
+		{BatchID: "b1", LogEntry: model.LogEntry{Service: "claims"}},
+	}
+	if pushError := rawLogsQueue.PushBatch(rawLogs); pushError != nil {
+		t.Fatalf("filling the raw logs queue failed: %v", pushError)
+	}
+
+	publishBatches := make(chan []model.EnrichedLog, 4)
+	publish := publisherFunc(func(logs []model.EnrichedLog) error {
+		publishBatches <- logs
+		return nil
+	})
+	route := routerFunc(func(log model.EnrichedLog) (model.EnrichedLog, error) {
+		if log.Service == "policy" {
+			log.Destination = model.DestinationService3
+		}
+		return log, nil
+	})
+
+	applicationContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	waitForConsumer(t, NewBatchConsumer(BatchConsumerDependencies{
+		RawLogsQueue:      rawLogsQueue,
+		ConsumerBatchSize: 10,
+		WorkerCount:       1,
+		Enricher:          fakeEnricher{},
+		Router:            route,
+		QueuePublisher:    publish,
+	}).Start(applicationContext))
+
+	batchedLogCount := 0
+	for len(publishBatches) > 0 {
+		publishBatch := <-publishBatches
+		batchedLogCount += len(publishBatch)
+		for _, enrichedLog := range publishBatch {
+			if enrichedLog.Service == "claims" && enrichedLog.Destination != model.DestinationService1 {
+				t.Errorf("claims log routed to %q, want %q", enrichedLog.Destination, model.DestinationService1)
+			}
+			if enrichedLog.Service == "policy" && enrichedLog.Destination != model.DestinationService3 {
+				t.Errorf("policy log routed to %q, want %q", enrichedLog.Destination, model.DestinationService3)
+			}
+		}
+	}
+	if batchedLogCount != 3 {
+		t.Errorf("published log count = %d, want 3", batchedLogCount)
 	}
 }
