@@ -70,7 +70,7 @@ export default function Metrics() {
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Total logs received" value={formatNumber(snapshot.total_logs_received)} />
         <StatCard label="Logs per second" value={formatNumber(snapshot.logs_per_second)} />
-        <StatCard label="Error rate" value={snapshot.error_rate === undefined ? '-' : snapshot.error_rate.toFixed(2) + '%'} />
+        <StatCard label="Error rate" value={snapshot.error_rate === undefined ? '-' : (snapshot.error_rate * 100).toFixed(2) + '%'} />
         <StatCard label="Queue backlog" value={formatNumber(snapshot.queue_backlog)} />
       </section>
 

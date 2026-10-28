@@ -28,13 +28,17 @@ export default function Dashboard() {
   const formatNumber = (value: number | undefined) =>
     value === undefined ? '-' : value.toLocaleString()
   const formatPercent = (value: number | undefined) =>
-    value === undefined ? '-' : value.toFixed(2) + '%'
+    value === undefined ? '-' : (value * 100).toFixed(2) + '%'
+
+  // The chart library plots points that carry an x value, so the history points are mapped from their timestamp.
+  const toChartPoints = (points?: Array<{ t: string; y: number }>) =>
+    (points ?? []).map((point) => ({ x: new Date(point.t), y: point.y }))
 
   const throughputData = {
     datasets: [
       {
         label: 'Logs per second',
-        data: snapshot.throughput_history ?? [],
+        data: toChartPoints(snapshot.throughput_history),
         borderColor: '#0f172a',
         backgroundColor: 'rgba(15, 23, 42, 0.1)',
         fill: true,
@@ -47,7 +51,7 @@ export default function Dashboard() {
     datasets: [
       {
         label: 'Error rate',
-        data: snapshot.error_rate_history ?? [],
+        data: toChartPoints(snapshot.error_rate_history),
         borderColor: '#b45309',
         backgroundColor: 'rgba(180, 83, 9, 0.1)',
         fill: true,
@@ -79,6 +83,14 @@ export default function Dashboard() {
     },
   } as const
 
+  const timeChartOptions = {
+    ...chartOptions,
+    scales: {
+      y: { beginAtZero: true, ticks: { font: { size: 11 } } },
+      x: { type: 'time' as const, ticks: { font: { size: 11 } } },
+    },
+  } as const
+
   return (
     <div className="space-y-6">
       <p className="text-sm text-slate-500">
@@ -101,7 +113,7 @@ export default function Dashboard() {
           <div className="mt-2 h-64">
             <ChartLine
               data={throughputData}
-              options={chartOptions}
+              options={timeChartOptions}
               height={320}
               width={640}
             />
@@ -110,7 +122,7 @@ export default function Dashboard() {
         <article className="rounded-xl bg-slate-50 p-4">
           <h2 className="text-sm text-slate-500">Error rate over time</h2>
           <div className="mt-2 h-64">
-            <ChartLine data={errorRateData} options={chartOptions} height={320} width={640} />
+            <ChartLine data={errorRateData} options={timeChartOptions} height={320} width={640} />
           </div>
         </article>
         <article className="rounded-xl bg-slate-50 p-4 lg:col-span-2">
