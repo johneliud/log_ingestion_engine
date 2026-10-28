@@ -153,6 +153,18 @@ On each `GET /metrics.json` request the service queries the RabbitMQ management 
 
 When the management API URL is not configured, unreachable, or rejects the request, the service logs a warning and reports a local fallback counter instead: an in-process estimate defined as messages published minus messages stored or released (`RecordQueueMessagePublished` / `RecordQueueMessageStored` / `RecordQueueMessageReleased`), floored at zero. The fallback value is intentionally not part of the snapshot; only `queue_backlog` carries the effective value.
 
+## GET /metrics/events
+
+Streams metrics snapshots as server-sent events (`text/event-stream`). The client connects with `EventSource` and receives an initial snapshot immediately, followed by a new snapshot whenever any counter changes (debounced to 200 ms). The connection stays open until the client closes it; `EventSource` reconnects automatically on connection loss.
+
+Each event is a single `data:` line containing a JSON `MetricsSnapshot`, followed by a blank line.
+
+### Responses
+
+| Status | Situation          | Body shape         |
+|--------|--------------------|--------------------|
+| 200    | `GET /metrics/events` | Server-sent events stream of `MetricsSnapshot` |
+
 ## Other endpoints
 
 | Method | Path                 | Body shape |

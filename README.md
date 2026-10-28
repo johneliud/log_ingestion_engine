@@ -84,6 +84,7 @@ cd log_ingestion_engine
 
 - Go 1.26 or newer (`go version`)
 - Docker (only for RabbitMQ during development)
+- Node.js 24 or newer and npm (`node --version`, `npm --version`) only needed to build or run the React frontend
 
 ## Setup
 
@@ -194,7 +195,7 @@ If the URL is unset or the API fails, a warning is logged and a local fallback c
 
 ## Frontend
 
-The React (TypeScript) + Vite frontend lives in [`frontend/`](frontend/) and is served separately from the Go backend. It polls `GET /metrics.json` every five seconds and renders the home page, dashboard and metrics views.
+The React (TypeScript) + Vite frontend lives in [`frontend/`](frontend/) and is served separately from the Go backend. It connects to `GET /metrics/events` via server-sent events and renders metrics instantly whenever a counter changes.
 
 ```bash
 cd frontend
@@ -203,9 +204,9 @@ npm run dev        # Vite dev server on http://localhost:5173
 npm run build      # production build to frontend/dist/
 ```
 
-The frontend uses Tailwind CSS, Space Grotesk (from the Google Fonts CDN) and React Router for navigation. It charts throughput and error rate with Chart.js and renders the architecture diagram with Mermaid. The diagram source is [`frontend/public/architecture.mmd`](frontend/public/architecture.mmd).
+The frontend uses Tailwind CSS, Space Grotesk (from the Google Fonts CDN) and React Router for navigation. It charts throughput and error rate with Chart.js and renders the architecture diagram with Mermaid. Metrics stream live through server-sent events. The diagram source is [`frontend/public/architecture.mmd`](frontend/public/architecture.mmd).
 
-The target downloads the Tailwind v4.3.3 standalone CLI (linux-x64) into the git-ignored `bin/` on first use. No Node or npm required, and `go build` never depends on it.
+Styles are built by Vite with the `@tailwindcss/vite` plugin; `npm run build` produces `frontend/dist/`.
 
 ## Known limitations
 

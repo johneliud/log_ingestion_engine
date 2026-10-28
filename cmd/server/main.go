@@ -110,7 +110,7 @@ func newServerApplication(applicationConfiguration config.ApplicationConfigurati
 
 	spoolFilePath := applicationConfiguration.SpoolFilePath
 	if spoolFilePath == "" {
-		spoolFilePath = filepath.Join(applicationConfiguration.DatabaseDirectoryPath, config.DefaultSpoolFilePath)
+		spoolFilePath = filepath.Join(filepath.Dir(applicationConfiguration.DatabaseDirectoryPath), config.DefaultSpoolFilePath)
 	}
 	ingestionSpool, spoolError := spool.NewSpool(spoolFilePath)
 	if spoolError != nil {
@@ -256,11 +256,11 @@ func trackRunningRequests(next http.Handler, runningRequests *sync.WaitGroup) ht
 }
 
 // Builds the request router with the ingestion and metrics API routes wired.
-// The user interface is served by the React frontend at frontend/.
 func buildRequestRouter(applicationConfiguration config.ApplicationConfiguration, ingestionHandler http.Handler, metricsRegistry *metrics.Metrics) *http.ServeMux {
 	requestRouter := http.NewServeMux()
 	requestRouter.Handle("POST /logs", ingestionHandler)
 	requestRouter.HandleFunc("GET /metrics.json", handler.NewMetricsHandler(metricsRegistry, applicationConfiguration))
+	requestRouter.HandleFunc("GET /metrics/events", handler.NewMetricsEventsHandler(metricsRegistry))
 	return requestRouter
 }
 
