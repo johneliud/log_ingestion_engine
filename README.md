@@ -105,7 +105,8 @@ Go dependencies resolve from `go.mod` automatically on the first build.
 1. `go run ./cmd/server`. The server listens on `HTTP_PORT` (default `8080`) and exposes `POST /logs` and `GET /metrics.json`. It shuts down cleanly on interrupt.
 2. Confirm it is up with `curl -s -i localhost:8080/metrics.json`.
 3. Start the frontend: `cd frontend && npm install && npm run dev`. The Vite dev server proxies API calls to `localhost:8080` and serves the home page, dashboard and metrics. Set `VITE_API_BASE_URL` in `frontend/.env` to point at a different backend URL if needed.
-3. Configuration auto-loading: Settings are loaded from `.env` via `godotenv.Read(".env")`. Process environment overrides `.env`; no external configuration file is used.
+
+Configuration auto-loading: Settings are loaded from `.env` via `godotenv.Read(".env")`. Process environment overrides `.env`; no external configuration file is used.
 
 `cmd/server` is the composition root which builds the rate limiter, ingestion handler, pipeline workers, publisher, consumers, batch writer, SQLite store and dead-letter writer from the configuration, starts them as background work and stops them in order.
 
