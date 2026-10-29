@@ -69,7 +69,7 @@ A consumer supervisor keeps one broker connection for the per-destination consum
 
 ## Concurrency model
 
-- HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded, condition-variable `pipeline.RawLogsQueue` (`raw_logs`, with a batch reservation timeout). A queue timeout returns `503` after the spooled batch is durably voided; if voiding fails, the durable batch is accepted for replay.
+- HTTP handlers are stateless; the only mutable state they touch is the rate-limiter registry and the bounded, condition-variable `pipeline.RawLogsQueue` (`raw_logs`, with a batch reservation timeout). A queue timeout returns `503` after the batch is durably spooled; the spool entry is retained for replay on restart, so the client may retry and create duplicates handled by `log_id` idempotency.
 - `PIPELINE_WORKER_COUNT` workers take batches from that one queue, enrich, route and publish each log, waiting for the broker confirm per log. They share one publisher whose bounded in-memory fallback and one fallback consumer drain it while disconnected.
 - One consumer per destination queue holds its own AMQP connection; the supervisor owns one shared connection and replaces failed subscriptions with backoff.
 - The batch writer is a single sink goroutine with per-destination buffers and one retry loop. The dead-letter writer is a single goroutine owning all file I/O. Metrics counters are mutex-guarded atomics-snapshot style.
