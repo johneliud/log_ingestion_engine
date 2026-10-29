@@ -1,4 +1,4 @@
-flowchart LR
+flowchart TB
     client(["Clients"])
 
     subgraph ingress["HTTP ingress"]
@@ -8,6 +8,7 @@ flowchart LR
         validate["Validate batch<br/>body size + per-entry errors"]
     end
 
+    spool[("Write-ahead spool<br/>fsync before ack")]
     rawQueue[("raw_logs<br/>bounded channel")]
 
     subgraph processing["Pipeline worker pool"]
@@ -35,7 +36,7 @@ flowchart LR
         replay["cmd/replay"]
     end
 
-    client --> rateLimit --> logsEndpoint --> validate --> rawQueue
+    client --> rateLimit --> logsEndpoint --> validate --> spool --> rawQueue
     rawQueue --> enrich --> route --> rabbitPublisher
     rabbitPublisher -->|"connected"| broker
     rabbitPublisher -->|"publish fails"| fallback

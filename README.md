@@ -19,7 +19,8 @@ flowchart TB
         validate["Validate batch<br/>body size + per-entry errors"]
     end
 
-    rawQueue[("raw_logs<br/>condition-variable queue")]
+    spool[("Write-ahead spool<br/>fsync before ack")]
+    rawQueue[("raw_logs<br/>bounded channel")]
 
     subgraph processing["Pipeline worker pool"]
         direction TB
@@ -46,10 +47,11 @@ flowchart TB
         replay["cmd/replay"]
     end
 
-    client --> rateLimit --> logsEndpoint --> validate --> rawQueue
+    client --> rateLimit --> logsEndpoint --> validate --> spool --> rawQueue
     rawQueue --> enrich --> route --> rabbitPublisher
     rabbitPublisher -->|"connected"| broker
     rabbitPublisher -->|"publish fails"| fallback
+    fallback -.->|"fallback full: dead letter"| deadLetters
     broker -->|"deliver"| supervisor
     supervisor --> amqpConsumer
     fallback -->|"stored directly, never re-published"| fallbackConsumer

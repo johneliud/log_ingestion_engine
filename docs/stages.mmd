@@ -1,0 +1,12 @@
+---
+title: "Six stages of the log ingestion engine"
+---
+flowchart LR
+    post["1 Post<br/>rate limit,<br/>accept the batch"]
+    validate["2 Validate and spool<br/>per-entry errors,<br/>fsync admission"]
+    buffer["3 Buffer<br/>bounded raw_logs<br/>channel (10,000)<br/>202 or 503"]
+    enrichRoute["4 Enrich and route<br/>stamp fields,<br/>pick destination"]
+    publish["5 Publish<br/>RabbitMQ, or the<br/>in-memory fallback"]
+    store["6 Consume and store<br/>batched SQLite writes,<br/>dead letters on failure"]
+
+    post --> validate --> buffer --> enrichRoute --> publish --> store
